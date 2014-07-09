@@ -66,7 +66,7 @@ public class IndexFieldMapper extends AbstractFieldMapper<String> implements Int
             FIELD_TYPE.freeze();
         }
 
-        public static final EnabledAttributeMapper ENABLED_STATE = EnabledAttributeMapper.DISABLED;
+        public static final EnabledAttributeMapper ENABLED_STATE = EnabledAttributeMapper.UNSET_DISABLED;
     }
 
     public static class Builder extends AbstractFieldMapper.Builder<Builder, IndexFieldMapper> {
@@ -135,7 +135,7 @@ public class IndexFieldMapper extends AbstractFieldMapper<String> implements Int
 
     @Override
     public FieldDataType defaultFieldDataType() {
-        return new FieldDataType("string");
+        return new FieldDataType(IndexFieldMapper.NAME);
     }
 
     @Override
@@ -172,10 +172,6 @@ public class IndexFieldMapper extends AbstractFieldMapper<String> implements Int
     }
 
     @Override
-    public void validate(ParseContext context) throws MapperParsingException {
-    }
-
-    @Override
     public boolean includeInObject() {
         return false;
     }
@@ -205,7 +201,7 @@ public class IndexFieldMapper extends AbstractFieldMapper<String> implements Int
         if (includeDefaults || fieldType().stored() != Defaults.FIELD_TYPE.stored() && enabledState.enabled) {
             builder.field("store", fieldType().stored());
         }
-        if (includeDefaults || enabledState != Defaults.ENABLED_STATE) {
+        if (includeDefaults || enabledState.enabled != Defaults.ENABLED_STATE.enabled) {
             builder.field("enabled", enabledState.enabled);
         }
 
@@ -228,4 +224,5 @@ public class IndexFieldMapper extends AbstractFieldMapper<String> implements Int
             }
         }
     }
+
 }

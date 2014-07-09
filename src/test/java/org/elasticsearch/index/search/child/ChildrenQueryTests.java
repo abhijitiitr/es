@@ -21,6 +21,7 @@ package org.elasticsearch.index.search.child;
 import com.carrotsearch.hppc.FloatArrayList;
 import com.carrotsearch.hppc.IntOpenHashSet;
 import com.carrotsearch.hppc.ObjectObjectOpenHashMap;
+import com.carrotsearch.randomizedtesting.generators.RandomInts;
 import org.apache.lucene.analysis.MockAnalyzer;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
@@ -31,6 +32,7 @@ import org.apache.lucene.search.*;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.LuceneTestCase;
+import org.elasticsearch.common.lease.Releasables;
 import org.elasticsearch.common.lucene.search.NotFilter;
 import org.elasticsearch.common.lucene.search.XFilteredQuery;
 import org.elasticsearch.index.engine.Engine;
@@ -67,7 +69,9 @@ public class ChildrenQueryTests extends ElasticsearchLuceneTestCase {
 
     @AfterClass
     public static void after() throws IOException {
+        SearchContext current = SearchContext.current();
         SearchContext.removeCurrent();
+        Releasables.close(current);
     }
 
     @Test
@@ -77,7 +81,10 @@ public class ChildrenQueryTests extends ElasticsearchLuceneTestCase {
         ParentFieldMapper parentFieldMapper = SearchContext.current().mapperService().documentMapper("child").parentFieldMapper();
         ParentChildIndexFieldData parentChildIndexFieldData = SearchContext.current().fieldData().getForField(parentFieldMapper);
         Filter parentFilter = new TermFilter(new Term(TypeFieldMapper.NAME, "parent"));
-        Query query = new ChildrenQuery(parentChildIndexFieldData, "parent", "child", parentFilter, childQuery, scoreType, 12, NonNestedDocsFilter.INSTANCE);
+        int minChildren = random().nextInt(10);
+        int maxChildren = scaledRandomIntBetween(minChildren, 10);
+        Query query = new ChildrenQuery(parentChildIndexFieldData, "parent", "child", parentFilter, childQuery, scoreType, minChildren,
+                maxChildren, 12, NonNestedDocsFilter.INSTANCE);
         QueryUtils.check(query);
     }
 
@@ -187,7 +194,8 @@ public class ChildrenQueryTests extends ElasticsearchLuceneTestCase {
 
             // Simulate a parent update
             if (random().nextBoolean()) {
-                int numberOfUpdates = 1 + random().nextInt(TEST_NIGHTLY ? 25 : 5);
+                final int numberOfUpdatableParents = numParentDocs - filteredOrDeletedDocs.size();
+                int numberOfUpdates = RandomInts.randomIntBetween(random(), 0, Math.min(numberOfUpdatableParents, TEST_NIGHTLY ? 25 : 5));
                 for (int j = 0; j < numberOfUpdates; j++) {
                     int parentId;
                     do {
@@ -217,7 +225,13 @@ public class ChildrenQueryTests extends ElasticsearchLuceneTestCase {
             int shortCircuitParentDocSet = random().nextInt(numParentDocs);
             ScoreType scoreType = ScoreType.values()[random().nextInt(ScoreType.values().length)];
             Filter nonNestedDocsFilter = random().nextBoolean() ? NonNestedDocsFilter.INSTANCE : null;
-            Query query = new ChildrenQuery(parentChildIndexFieldData, "parent", "child", parentFilter, childQuery, scoreType, shortCircuitParentDocSet, nonNestedDocsFilter);
+
+            // leave min/max set to 0 half the time
+            int minChildren = random().nextInt(2) * scaledRandomIntBetween(0, 110);
+            int maxChildren = random().nextInt(2) * scaledRandomIntBetween(minChildren, 110);
+
+            Query query = new ChildrenQuery(parentChildIndexFieldData, "parent", "child", parentFilter, childQuery, scoreType, minChildren,
+                    maxChildren, shortCircuitParentDocSet, nonNestedDocsFilter);
             query = new XFilteredQuery(query, filterMe);
             BitSetCollector collector = new BitSetCollector(indexReader.maxDoc());
             int numHits = 1 + random().nextInt(25);
@@ -237,14 +251,17 @@ public class ChildrenQueryTests extends ElasticsearchLuceneTestCase {
                     TermsEnum termsEnum = terms.iterator(null);
                     DocsEnum docsEnum = null;
                     for (Map.Entry<String, FloatArrayList> entry : parentIdToChildScores.entrySet()) {
-                        TermsEnum.SeekStatus seekStatus = termsEnum.seekCeil(Uid.createUidAsBytes("parent", entry.getKey()));
-                        if (seekStatus == TermsEnum.SeekStatus.FOUND) {
-                            docsEnum = termsEnum.docs(slowAtomicReader.getLiveDocs(), docsEnum, DocsEnum.FLAG_NONE);
-                            expectedResult.set(docsEnum.nextDoc());
-                            mockScorer.scores = entry.getValue();
-                            expectedTopDocsCollector.collect(docsEnum.docID());
-                        } else if (seekStatus == TermsEnum.SeekStatus.END) {
-                            break;
+                        int count = entry.getValue().elementsCount;
+                        if (count >= minChildren && (maxChildren == 0 || count <= maxChildren)) {
+                            TermsEnum.SeekStatus seekStatus = termsEnum.seekCeil(Uid.createUidAsBytes("parent", entry.getKey()));
+                            if (seekStatus == TermsEnum.SeekStatus.FOUND) {
+                                docsEnum = termsEnum.docs(slowAtomicReader.getLiveDocs(), docsEnum, DocsEnum.FLAG_NONE);
+                                expectedResult.set(docsEnum.nextDoc());
+                                mockScorer.scores = entry.getValue();
+                                expectedTopDocsCollector.collect(docsEnum.docID());
+                            } else if (seekStatus == TermsEnum.SeekStatus.END) {
+                                break;
+                            }
                         }
                     }
                 }

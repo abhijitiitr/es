@@ -19,33 +19,33 @@
 
 package org.elasticsearch.index.fielddata.ordinals;
 
-import org.apache.lucene.util.LongsRef;
+import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.packed.PackedInts;
+import org.elasticsearch.index.fielddata.BytesValues;
+import org.elasticsearch.index.fielddata.BytesValues.WithOrdinals;
 
 /**
  */
-public class SinglePackedOrdinals implements Ordinals {
+public class SinglePackedOrdinals extends Ordinals {
 
     // ordinals with value 0 indicates no value
     private final PackedInts.Reader reader;
-    private final long numOrds;
     private final long maxOrd;
 
     private long size = -1;
 
     public SinglePackedOrdinals(OrdinalsBuilder builder, float acceptableOverheadRatio) {
         assert builder.getNumMultiValuesDocs() == 0;
-        this.numOrds = builder.getNumOrds();
-        this.maxOrd = builder.getNumOrds() + 1;
+        this.maxOrd = builder.getMaxOrd();
         // We don't reuse the builder as-is because it might have been built with a higher overhead ratio
-        final PackedInts.Mutable reader = PackedInts.getMutable(builder.maxDoc(), PackedInts.bitsRequired(getNumOrds()), acceptableOverheadRatio);
+        final PackedInts.Mutable reader = PackedInts.getMutable(builder.maxDoc(), PackedInts.bitsRequired(maxOrd), acceptableOverheadRatio);
         PackedInts.copy(builder.getFirstOrdinals(), 0, reader, 0, builder.maxDoc(), 8 * 1024);
         this.reader = reader;
     }
 
     @Override
-    public long getMemorySizeInBytes() {
+    public long ramBytesUsed() {
         if (size == -1) {
             size = RamUsageEstimator.NUM_BYTES_OBJECT_REF + reader.ramBytesUsed();
         }
@@ -53,98 +53,51 @@ public class SinglePackedOrdinals implements Ordinals {
     }
 
     @Override
-    public boolean isMultiValued() {
-        return false;
+    public WithOrdinals ordinals(ValuesHolder values) {
+        return new Docs(this, values);
     }
 
-    @Override
-    public int getNumDocs() {
-        return reader.size();
-    }
+    private static class Docs extends BytesValues.WithOrdinals {
 
-    @Override
-    public long getNumOrds() {
-        return numOrds;
-    }
-
-    @Override
-    public long getMaxOrd() {
-        return maxOrd;
-    }
-
-    @Override
-    public Docs ordinals() {
-        return new Docs(this, reader);
-    }
-
-    public static class Docs implements Ordinals.Docs {
-
-        private final SinglePackedOrdinals parent;
+        private final long maxOrd;
         private final PackedInts.Reader reader;
+        private final ValuesHolder values;
 
-        private final LongsRef longsScratch = new LongsRef(1);
         private long currentOrdinal;
 
-        public Docs(SinglePackedOrdinals parent, PackedInts.Reader reader) {
-            this.parent = parent;
-            this.reader = reader;
-        }
-
-        @Override
-        public Ordinals ordinals() {
-            return parent;
-        }
-
-        @Override
-        public int getNumDocs() {
-            return parent.getNumDocs();
-        }
-
-        @Override
-        public long getNumOrds() {
-            return parent.getNumOrds();
+        public Docs(SinglePackedOrdinals parent, ValuesHolder values) {
+            super(false);
+            this.maxOrd = parent.maxOrd;
+            this.reader = parent.reader;
+            this.values = values;
         }
 
         @Override
         public long getMaxOrd() {
-            return parent.getMaxOrd();
-        }
-
-        @Override
-        public boolean isMultiValued() {
-            return false;
+            return maxOrd;
         }
 
         @Override
         public long getOrd(int docId) {
-            return currentOrdinal = reader.get(docId);
-        }
-
-        @Override
-        public LongsRef getOrds(int docId) {
-            final long ordinal = reader.get(docId);
-            longsScratch.offset = 0;
-            longsScratch.length = (int)Math.min(currentOrdinal, 1);
-            longsScratch.longs[0] = currentOrdinal = ordinal;
-            return longsScratch;
+            return currentOrdinal = reader.get(docId) - 1;
         }
 
         @Override
         public long nextOrd() {
-            assert currentOrdinal > 0;
+            assert currentOrdinal >= MIN_ORDINAL;
             return currentOrdinal;
         }
 
         @Override
         public int setDocument(int docId) {
-            currentOrdinal = reader.get(docId);
+            currentOrdinal = reader.get(docId) - 1;
             // either this is > 1 or 0 - in any case it prevents a branch!
-            return (int)Math.min(currentOrdinal, 1);
+            return 1 + (int) Math.min(currentOrdinal, 0);
         }
 
         @Override
-        public long currentOrd() {
-            return currentOrdinal;
+        public BytesRef getValueByOrd(long ord) {
+            return values.getValueByOrd(ord);
         }
     }
 }

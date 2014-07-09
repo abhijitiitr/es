@@ -20,6 +20,7 @@
 package org.elasticsearch.index.fielddata.plain;
 
 import org.apache.lucene.index.AtomicReader;
+import org.apache.lucene.index.DocValues;
 import org.apache.lucene.index.NumericDocValues;
 import org.apache.lucene.util.Bits;
 import org.elasticsearch.ElasticsearchIllegalStateException;
@@ -48,23 +49,7 @@ public class NumericDVAtomicFieldData extends AbstractAtomicNumericFieldData {
     }
 
     @Override
-    public boolean isMultiValued() {
-        return false;
-    }
-
-    @Override
-    public int getNumDocs() {
-        return reader.maxDoc();
-    }
-
-    @Override
-    public long getNumberUniqueValues() {
-        // good upper limit
-        return reader.maxDoc();
-    }
-
-    @Override
-    public long getMemorySizeInBytes() {
+    public long ramBytesUsed() {
         // TODO: cannot be computed from Lucene
         return -1;
     }
@@ -81,23 +66,13 @@ public class NumericDVAtomicFieldData extends AbstractAtomicNumericFieldData {
     }
 
     private DocValuesAndBits getDocValues() {
-        final NumericDocValues values;
-        final Bits docsWithField;
         try {
-            final NumericDocValues v = reader.getNumericDocValues(field);
-            if (v == null) {
-                // segment has no value
-                values = NumericDocValues.EMPTY;
-                docsWithField = new Bits.MatchNoBits(reader.maxDoc());
-            } else {
-                values = v;
-                final Bits b = reader.getDocsWithField(field);
-                docsWithField = b == null ? new Bits.MatchAllBits(reader.maxDoc()) : b;
-            }
+            final NumericDocValues values = DocValues.getNumeric(reader, field);
+            final Bits docsWithField = DocValues.getDocsWithField(reader, field);
+            return new DocValuesAndBits(values, docsWithField);
         } catch (IOException e) {
             throw new ElasticsearchIllegalStateException("Cannot load doc values", e);
         }
-        return new DocValuesAndBits(values, docsWithField);
     }
 
     @Override

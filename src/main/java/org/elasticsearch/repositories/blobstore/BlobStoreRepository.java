@@ -52,6 +52,7 @@ import org.elasticsearch.snapshots.*;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.nio.file.NoSuchFileException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -258,7 +259,7 @@ public abstract class BlobStoreRepository extends AbstractLifecycleComponent<Rep
     @Override
     public void deleteSnapshot(SnapshotId snapshotId) {
         Snapshot snapshot = readSnapshot(snapshotId);
-        MetaData metaData = readSnapshotMetaData(snapshotId, snapshot.indices());
+        MetaData metaData = readSnapshotMetaData(snapshotId, snapshot.indices(), true);
         try {
             String blobName = snapshotBlobName(snapshotId);
             // Delete snapshot file first so we wouldn't end up with partially deleted snapshot that looks OK
@@ -283,11 +284,13 @@ public abstract class BlobStoreRepository extends AbstractLifecycleComponent<Rep
                 try {
                     indexMetaDataBlobContainer.deleteBlob(blobName);
                 } catch (IOException ex) {
-                    throw new SnapshotException(snapshotId, "failed to delete metadata", ex);
+                    logger.warn("[{}] failed to delete metadata for index [{}]", ex, snapshotId, index);
                 }
                 IndexMetaData indexMetaData = metaData.index(index);
-                for (int i = 0; i < indexMetaData.getNumberOfShards(); i++) {
-                    indexShardRepository.delete(snapshotId, new ShardId(index, i));
+                if (indexMetaData != null) {
+                    for (int i = 0; i < indexMetaData.getNumberOfShards(); i++) {
+                        indexShardRepository.delete(snapshotId, new ShardId(index, i));
+                    }
                 }
             }
         } catch (IOException ex) {
@@ -311,7 +314,11 @@ public abstract class BlobStoreRepository extends AbstractLifecycleComponent<Rep
             String blobName = snapshotBlobName(snapshotId);
             BlobStoreSnapshot.Builder updatedSnapshot = BlobStoreSnapshot.builder().snapshot(snapshot);
             if (failure == null) {
-                updatedSnapshot.success();
+                if (shardFailures.isEmpty()) {
+                    updatedSnapshot.success();
+                } else {
+                    updatedSnapshot.partial();
+                }
                 updatedSnapshot.failures(totalShards, shardFailures);
             } else {
                 updatedSnapshot.failed(failure);
@@ -362,41 +369,7 @@ public abstract class BlobStoreRepository extends AbstractLifecycleComponent<Rep
      */
     @Override
     public MetaData readSnapshotMetaData(SnapshotId snapshotId, ImmutableList<String> indices) {
-        MetaData metaData;
-        try {
-            byte[] data = snapshotsBlobContainer.readBlobFully(metaDataBlobName(snapshotId));
-            metaData = readMetaData(data);
-        } catch (FileNotFoundException ex) {
-            throw new SnapshotMissingException(snapshotId, ex);
-        } catch (IOException ex) {
-            throw new SnapshotException(snapshotId, "failed to get snapshots", ex);
-        }
-        MetaData.Builder metaDataBuilder = MetaData.builder(metaData);
-        for (String index : indices) {
-            BlobPath indexPath = basePath().add("indices").add(index);
-            ImmutableBlobContainer indexMetaDataBlobContainer = blobStore().immutableBlobContainer(indexPath);
-            XContentParser parser = null;
-            try {
-                byte[] data = indexMetaDataBlobContainer.readBlobFully(snapshotBlobName(snapshotId));
-                parser = XContentHelper.createParser(data, 0, data.length);
-                XContentParser.Token token;
-                if ((token = parser.nextToken()) == XContentParser.Token.START_OBJECT) {
-                    IndexMetaData indexMetaData = IndexMetaData.Builder.fromXContent(parser);
-                    if ((token = parser.nextToken()) == XContentParser.Token.END_OBJECT) {
-                        metaDataBuilder.put(indexMetaData, false);
-                        continue;
-                    }
-                }
-                throw new ElasticsearchParseException("unexpected token  [" + token + "]");
-            } catch (IOException ex) {
-                throw new SnapshotException(snapshotId, "failed to read metadata", ex);
-            } finally {
-                if (parser != null) {
-                    parser.close();
-                }
-            }
-        }
-        return metaDataBuilder.build();
+        return readSnapshotMetaData(snapshotId, indices, false);
     }
 
     /**
@@ -427,11 +400,53 @@ public abstract class BlobStoreRepository extends AbstractLifecycleComponent<Rep
                     }
                 }
             }
-        } catch (FileNotFoundException ex) {
+        } catch (FileNotFoundException | NoSuchFileException ex) {
             throw new SnapshotMissingException(snapshotId, ex);
         } catch (IOException ex) {
             throw new SnapshotException(snapshotId, "failed to get snapshots", ex);
         }
+    }
+
+    private MetaData readSnapshotMetaData(SnapshotId snapshotId, ImmutableList<String> indices, boolean ignoreIndexErrors) {
+        MetaData metaData;
+        try {
+            byte[] data = snapshotsBlobContainer.readBlobFully(metaDataBlobName(snapshotId));
+            metaData = readMetaData(data);
+        } catch (FileNotFoundException | NoSuchFileException ex) {
+            throw new SnapshotMissingException(snapshotId, ex);
+        } catch (IOException ex) {
+            throw new SnapshotException(snapshotId, "failed to get snapshots", ex);
+        }
+        MetaData.Builder metaDataBuilder = MetaData.builder(metaData);
+        for (String index : indices) {
+            BlobPath indexPath = basePath().add("indices").add(index);
+            ImmutableBlobContainer indexMetaDataBlobContainer = blobStore().immutableBlobContainer(indexPath);
+            try {
+                byte[] data = indexMetaDataBlobContainer.readBlobFully(snapshotBlobName(snapshotId));
+                try (XContentParser parser = XContentHelper.createParser(data, 0, data.length)) {
+                    XContentParser.Token token;
+                    if ((token = parser.nextToken()) == XContentParser.Token.START_OBJECT) {
+                        IndexMetaData indexMetaData = IndexMetaData.Builder.fromXContent(parser);
+                        if ((token = parser.nextToken()) == XContentParser.Token.END_OBJECT) {
+                            metaDataBuilder.put(indexMetaData, false);
+                            continue;
+                        }
+                    }
+                    if (!ignoreIndexErrors) {
+                        throw new ElasticsearchParseException("unexpected token  [" + token + "]");
+                    } else {
+                        logger.warn("[{}] [{}] unexpected token while reading snapshot metadata [{}]", snapshotId, index, token);
+                    }
+                }
+            } catch (IOException ex) {
+                if (!ignoreIndexErrors) {
+                    throw new SnapshotException(snapshotId, "failed to read metadata", ex);
+                } else {
+                    logger.warn("[{}] [{}] failed to read metadata for index", snapshotId, index, ex);
+                }
+            }
+        }
+        return metaDataBuilder.build();
     }
 
     /**
@@ -460,9 +475,7 @@ public abstract class BlobStoreRepository extends AbstractLifecycleComponent<Rep
      * @throws IOException parse exceptions
      */
     private BlobStoreSnapshot readSnapshot(byte[] data) throws IOException {
-        XContentParser parser = null;
-        try {
-            parser = XContentHelper.createParser(data, 0, data.length);
+        try (XContentParser parser = XContentHelper.createParser(data, 0, data.length)) {
             XContentParser.Token token;
             if ((token = parser.nextToken()) == XContentParser.Token.START_OBJECT) {
                 if ((token = parser.nextToken()) == XContentParser.Token.FIELD_NAME) {
@@ -474,10 +487,6 @@ public abstract class BlobStoreRepository extends AbstractLifecycleComponent<Rep
                 }
             }
             throw new ElasticsearchParseException("unexpected token  [" + token + "]");
-        } finally {
-            if (parser != null) {
-                parser.close();
-            }
         }
     }
 
@@ -489,9 +498,7 @@ public abstract class BlobStoreRepository extends AbstractLifecycleComponent<Rep
      * @throws IOException parse exceptions
      */
     private MetaData readMetaData(byte[] data) throws IOException {
-        XContentParser parser = null;
-        try {
-            parser = XContentHelper.createParser(data, 0, data.length);
+        try (XContentParser parser = XContentHelper.createParser(data, 0, data.length)) {
             XContentParser.Token token;
             if ((token = parser.nextToken()) == XContentParser.Token.START_OBJECT) {
                 if ((token = parser.nextToken()) == XContentParser.Token.FIELD_NAME) {
@@ -503,10 +510,6 @@ public abstract class BlobStoreRepository extends AbstractLifecycleComponent<Rep
                 }
             }
             throw new ElasticsearchParseException("unexpected token  [" + token + "]");
-        } finally {
-            if (parser != null) {
-                parser.close();
-            }
         }
     }
 
@@ -610,9 +613,7 @@ public abstract class BlobStoreRepository extends AbstractLifecycleComponent<Rep
     protected ImmutableList<SnapshotId> readSnapshotList() throws IOException {
         byte[] data = snapshotsBlobContainer.readBlobFully(SNAPSHOTS_FILE);
         ArrayList<SnapshotId> snapshots = new ArrayList<>();
-        XContentParser parser = null;
-        try {
-            parser = XContentHelper.createParser(data, 0, data.length);
+        try (XContentParser parser = XContentHelper.createParser(data, 0, data.length)) {
             if (parser.nextToken() == XContentParser.Token.START_OBJECT) {
                 if (parser.nextToken() == XContentParser.Token.FIELD_NAME) {
                     String currentFieldName = parser.currentName();
@@ -624,10 +625,6 @@ public abstract class BlobStoreRepository extends AbstractLifecycleComponent<Rep
                         }
                     }
                 }
-            }
-        } finally {
-            if (parser != null) {
-                parser.close();
             }
         }
         return ImmutableList.copyOf(snapshots);

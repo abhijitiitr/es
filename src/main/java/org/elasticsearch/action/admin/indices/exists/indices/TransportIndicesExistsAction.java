@@ -21,6 +21,7 @@ package org.elasticsearch.action.admin.indices.exists.indices;
 
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.action.support.master.TransportMasterNodeReadOperationAction;
 import org.elasticsearch.cluster.ClusterService;
 import org.elasticsearch.cluster.ClusterState;
@@ -65,15 +66,10 @@ public class TransportIndicesExistsAction extends TransportMasterNodeReadOperati
     }
 
     @Override
-    protected void doExecute(IndicesExistsRequest request, ActionListener<IndicesExistsResponse> listener) {
-        // don't call this since it will throw IndexMissingException
-        //request.indices(clusterService.state().metaData().concreteIndices(request.indices()));
-        super.doExecute(request, listener);
-    }
-
-    @Override
     protected ClusterBlockException checkBlock(IndicesExistsRequest request, ClusterState state) {
-        return state.blocks().indicesBlockedException(ClusterBlockLevel.METADATA, request.indices());
+        //make sure through indices options that the concrete indices call never throws IndexMissingException
+        IndicesOptions indicesOptions = IndicesOptions.fromOptions(true, true, request.indicesOptions().expandWildcardsOpen(), request.indicesOptions().expandWildcardsClosed());
+        return state.blocks().indicesBlockedException(ClusterBlockLevel.METADATA, clusterService.state().metaData().concreteIndices(indicesOptions, request.indices()));
     }
 
     @Override
@@ -81,7 +77,7 @@ public class TransportIndicesExistsAction extends TransportMasterNodeReadOperati
         boolean exists;
         try {
             // Similar as the previous behaviour, but now also aliases and wildcards are supported.
-            clusterService.state().metaData().concreteIndices(request.indices(), request.indicesOptions());
+            clusterService.state().metaData().concreteIndices(request.indicesOptions(), request.indices());
             exists = true;
         } catch (IndexMissingException e) {
             exists = false;

@@ -31,54 +31,32 @@ import org.elasticsearch.index.fielddata.ScriptDocValues;
 public class ParentChildAtomicFieldData implements AtomicFieldData {
 
     private final ImmutableOpenMap<String, PagedBytesAtomicFieldData> typeToIds;
-    private final long numberUniqueValues;
     private final long memorySizeInBytes;
-    private final int numDocs;
 
     public ParentChildAtomicFieldData(ImmutableOpenMap<String, PagedBytesAtomicFieldData> typeToIds) {
         this.typeToIds = typeToIds;
-        long numValues = 0;
-        for (ObjectCursor<PagedBytesAtomicFieldData> cursor : typeToIds.values()) {
-            numValues += cursor.value.getNumberUniqueValues();
-        }
-        this.numberUniqueValues = numValues;
         long size = 0;
         for (ObjectCursor<PagedBytesAtomicFieldData> cursor : typeToIds.values()) {
-            size += cursor.value.getMemorySizeInBytes();
+            size += cursor.value.ramBytesUsed();
         }
         this.memorySizeInBytes = size;
-        this.numDocs = typeToIds.isEmpty() ? 0 : typeToIds.values().toArray(PagedBytesAtomicFieldData.class)[0].getNumDocs();
     }
 
     @Override
-    public boolean isMultiValued() {
-        return true;
-    }
-
-    @Override
-    public int getNumDocs() {
-        return numDocs;
-    }
-
-    @Override
-    public long getNumberUniqueValues() {
-        return numberUniqueValues;
-    }
-
-    @Override
-    public long getMemorySizeInBytes() {
+    public long ramBytesUsed() {
         return memorySizeInBytes;
     }
 
     @Override
-    public BytesValues getBytesValues(boolean needsHashes) {
+    public BytesValues getBytesValues() {
         final BytesValues[] bytesValues = new BytesValues[typeToIds.size()];
         int index = 0;
         for (ObjectCursor<PagedBytesAtomicFieldData> cursor : typeToIds.values()) {
-            bytesValues[index++] = cursor.value.getBytesValues(needsHashes);
+            bytesValues[index++] = cursor.value.getBytesValues();
         }
         return new BytesValues(true) {
 
+            private final BytesRef scratch = new BytesRef();
             private final BytesRef[] terms = new BytesRef[2];
             private int index;
 
@@ -90,8 +68,7 @@ public class ParentChildAtomicFieldData implements AtomicFieldData {
                     int numValues = values.setDocument(docId);
                     assert numValues <= 1 : "Per doc/type combination only a single value is allowed";
                     if (numValues == 1) {
-                        values.nextValue();
-                        terms[counter++] = values.copyShared();
+                        terms[counter++] = BytesRef.deepCopyOf(values.nextValue());
                     }
                 }
                 assert counter <= 2 : "A single doc can potentially be both parent and child, so the maximum allowed values is 2";
@@ -123,15 +100,19 @@ public class ParentChildAtomicFieldData implements AtomicFieldData {
     public BytesValues.WithOrdinals getBytesValues(String type) {
         WithOrdinals atomicFieldData = typeToIds.get(type);
         if (atomicFieldData != null) {
-            return atomicFieldData.getBytesValues(true);
+            return atomicFieldData.getBytesValues();
         } else {
             return null;
         }
     }
 
+    public WithOrdinals getAtomicFieldData(String type) {
+        return typeToIds.get(type);
+    }
+
     @Override
     public ScriptDocValues getScriptValues() {
-        return new ScriptDocValues.Strings(getBytesValues(false));
+        return new ScriptDocValues.Strings(getBytesValues());
     }
 
     @Override

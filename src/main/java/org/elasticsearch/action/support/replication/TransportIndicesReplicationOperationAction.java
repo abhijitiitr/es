@@ -74,7 +74,7 @@ public abstract class TransportIndicesReplicationOperationAction<Request extends
             throw blockException;
         }
         // get actual indices
-        String[] concreteIndices = clusterState.metaData().concreteIndices(request.indices(), request.indicesOptions());
+        String[] concreteIndices = clusterState.metaData().concreteIndices(request.indicesOptions(), request.indices());
         blockException = checkRequestBlock(clusterState, request, concreteIndices);
         if (blockException != null) {
             throw blockException;
@@ -86,7 +86,7 @@ public abstract class TransportIndicesReplicationOperationAction<Request extends
         final long startTimeInMillis = System.currentTimeMillis();
 
         Map<String, Set<String>> routingMap = resolveRouting(clusterState, request);
-        if (concreteIndices == null || concreteIndices.length == 0) {
+        if (concreteIndices.length == 0) {
             listener.onResponse(newResponseInstance(request, indexResponses));
         } else {
             for (final String index : concreteIndices) {

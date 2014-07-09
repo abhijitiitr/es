@@ -25,22 +25,21 @@ import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.lucene.search.NotFilter;
 import org.elasticsearch.common.lucene.search.XBooleanFilter;
-import org.elasticsearch.common.lucene.search.XConstantScoreQuery;
 import org.elasticsearch.common.lucene.search.XFilteredQuery;
 import org.elasticsearch.common.xcontent.XContentParser;
-import org.elasticsearch.index.query.support.XContentStructure;
 import org.elasticsearch.index.fielddata.plain.ParentChildIndexFieldData;
 import org.elasticsearch.index.mapper.DocumentMapper;
 import org.elasticsearch.index.mapper.internal.ParentFieldMapper;
+import org.elasticsearch.index.query.support.XContentStructure;
 import org.elasticsearch.index.search.child.CustomQueryWrappingFilter;
-import org.elasticsearch.index.search.child.DeleteByQueryWrappingFilter;
 import org.elasticsearch.index.search.child.ParentConstantScoreQuery;
 import org.elasticsearch.index.search.child.ParentQuery;
-import org.elasticsearch.search.internal.SearchContext;
 
 import java.io.IOException;
 import java.util.HashSet;
 import java.util.Set;
+
+import static org.elasticsearch.index.query.QueryParserUtils.ensureNotDeleteByQuery;
 
 public class HasParentQueryParser implements QueryParser {
 
@@ -57,6 +56,7 @@ public class HasParentQueryParser implements QueryParser {
 
     @Override
     public Query parse(QueryParseContext parseContext) throws IOException, QueryParsingException {
+        ensureNotDeleteByQuery(NAME, parseContext);
         XContentParser parser = parseContext.parser();
 
         boolean queryFound = false;
@@ -135,10 +135,10 @@ public class HasParentQueryParser implements QueryParser {
         ParentChildIndexFieldData parentChildIndexFieldData = null;
         Set<String> parentTypes = new HashSet<>(5);
         parentTypes.add(parentType);
-        for (DocumentMapper documentMapper : parseContext.mapperService()) {
+        for (DocumentMapper documentMapper : parseContext.mapperService().docMappers(false)) {
             ParentFieldMapper parentFieldMapper = documentMapper.parentFieldMapper();
             if (parentFieldMapper.active()) {
-                parentChildIndexFieldData = parseContext.fieldData().getForField(parentFieldMapper);
+                parentChildIndexFieldData = parseContext.getForField(parentFieldMapper);
                 DocumentMapper parentTypeDocumentMapper = parseContext.mapperService().documentMapper(parentFieldMapper.type());
                 if (parentTypeDocumentMapper == null) {
                     // Only add this, if this parentFieldMapper (also a parent)  isn't a child of another parent.
@@ -165,15 +165,11 @@ public class HasParentQueryParser implements QueryParser {
         }
         Filter childrenFilter = parseContext.cacheFilter(new NotFilter(parentFilter), null);
 
-        boolean deleteByQuery = "delete_by_query".equals(SearchContext.current().source());
         Query query;
-        if (!deleteByQuery && score) {
+        if (score) {
             query = new ParentQuery(parentChildIndexFieldData, innerQuery, parentType, childrenFilter);
         } else {
             query = new ParentConstantScoreQuery(parentChildIndexFieldData, innerQuery, parentType, childrenFilter);
-            if (deleteByQuery) {
-                query = new XConstantScoreQuery(new DeleteByQueryWrappingFilter(query));
-            }
         }
         query.setBoost(boost);
         if (queryName != null) {

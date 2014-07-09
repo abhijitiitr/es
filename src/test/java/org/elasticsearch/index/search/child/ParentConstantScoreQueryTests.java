@@ -30,6 +30,7 @@ import org.apache.lucene.search.*;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.LuceneTestCase;
+import org.elasticsearch.common.lease.Releasables;
 import org.elasticsearch.common.lucene.search.NotFilter;
 import org.elasticsearch.common.lucene.search.XConstantScoreQuery;
 import org.elasticsearch.common.lucene.search.XFilteredQuery;
@@ -66,7 +67,9 @@ public class ParentConstantScoreQueryTests extends ElasticsearchLuceneTestCase {
 
     @AfterClass
     public static void after() throws IOException {
+        SearchContext current = SearchContext.current();
         SearchContext.removeCurrent();
+        Releasables.close(current);
     }
 
     @Test
@@ -184,7 +187,7 @@ public class ParentConstantScoreQueryTests extends ElasticsearchLuceneTestCase {
 
             // Simulate a child update
             if (random().nextBoolean()) {
-                int numberOfUpdates = scaledRandomIntBetween(1, 25);
+                int numberOfUpdates = childIdToParentId.isEmpty() ? 0 : scaledRandomIntBetween(1, 25);
                 int[] childIds = childIdToParentId.keys().toArray();
                 for (int j = 0; j < numberOfUpdates; j++) {
                     int childId = childIds[random().nextInt(childIds.length)];

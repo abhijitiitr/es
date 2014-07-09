@@ -69,8 +69,11 @@ import org.elasticsearch.search.dfs.CachedDfSource;
 import org.elasticsearch.search.dfs.DfsPhase;
 import org.elasticsearch.search.dfs.DfsSearchResult;
 import org.elasticsearch.search.fetch.*;
-import org.elasticsearch.search.internal.*;
+import org.elasticsearch.search.internal.DefaultSearchContext;
+import org.elasticsearch.search.internal.InternalScrollSearchRequest;
+import org.elasticsearch.search.internal.SearchContext;
 import org.elasticsearch.search.internal.SearchContext.Lifetime;
+import org.elasticsearch.search.internal.ShardSearchRequest;
 import org.elasticsearch.search.query.*;
 import org.elasticsearch.search.warmer.IndexWarmersMetaData;
 import org.elasticsearch.threadpool.ThreadPool;
@@ -538,13 +541,14 @@ public class SearchService extends AbstractLifecycleComponent<SearchService> {
         return context;
     }
 
-    public void freeContext(long id) {
+    public boolean freeContext(long id) {
         SearchContext context = activeContexts.remove(id);
         if (context == null) {
-            return;
+            return false;
         }
         context.indexShard().searchService().onFreeContext(context);
         context.close();
+        return true;
     }
 
     private void freeContext(SearchContext context) {
@@ -617,6 +621,10 @@ public class SearchService extends AbstractLifecycleComponent<SearchService> {
         try {
             parser = XContentFactory.xContent(source).createParser(source);
             XContentParser.Token token;
+            token = parser.nextToken();
+            if (token != XContentParser.Token.START_OBJECT) {
+                throw new ElasticsearchParseException("Expected START_OBJECT but got " + token.name() + " " + parser.currentName());
+            }
             while ((token = parser.nextToken()) != XContentParser.Token.END_OBJECT) {
                 if (token == XContentParser.Token.FIELD_NAME) {
                     String fieldName = parser.currentName();
@@ -626,8 +634,12 @@ public class SearchService extends AbstractLifecycleComponent<SearchService> {
                         throw new SearchParseException(context, "No parser for element [" + fieldName + "]");
                     }
                     element.parse(parser, context);
-                } else if (token == null) {
-                    break;
+                } else {
+                    if (token == null) {
+                        throw new ElasticsearchParseException("End of query source reached but query is not complete.");
+                    } else {
+                        throw new ElasticsearchParseException("Expected field name but got " + token.name() + " \"" + parser.currentName() + "\"");
+                    }
                 }
             }
         } catch (Throwable e) {
@@ -712,7 +724,7 @@ public class SearchService extends AbstractLifecycleComponent<SearchService> {
             final Loading defaultLoading = Loading.parse(indexMetaData.settings().get(NORMS_LOADING_KEY), Loading.LAZY);
             final MapperService mapperService = indexShard.mapperService();
             final ObjectSet<String> warmUp = new ObjectOpenHashSet<>();
-            for (DocumentMapper docMapper : mapperService) {
+            for (DocumentMapper docMapper : mapperService.docMappers(false)) {
                 for (FieldMapper<?> fieldMapper : docMapper.mappers().mappers()) {
                     final String indexName = fieldMapper.names().indexName();
                     if (fieldMapper.fieldType().indexed() && !fieldMapper.fieldType().omitNorms() && fieldMapper.normsLoading(defaultLoading) == Loading.EAGER) {
@@ -763,7 +775,7 @@ public class SearchService extends AbstractLifecycleComponent<SearchService> {
         public TerminationHandle warm(final IndexShard indexShard, IndexMetaData indexMetaData, final WarmerContext context, ThreadPool threadPool) {
             final MapperService mapperService = indexShard.mapperService();
             final Map<String, FieldMapper<?>> warmUp = new HashMap<>();
-            for (DocumentMapper docMapper : mapperService) {
+            for (DocumentMapper docMapper : mapperService.docMappers(false)) {
                 for (FieldMapper<?> fieldMapper : docMapper.mappers().mappers()) {
                     final FieldDataType fieldDataType = fieldMapper.fieldDataType();
                     if (fieldDataType == null) {
@@ -817,7 +829,7 @@ public class SearchService extends AbstractLifecycleComponent<SearchService> {
         public TerminationHandle warmTop(final IndexShard indexShard, IndexMetaData indexMetaData, final WarmerContext context, ThreadPool threadPool) {
             final MapperService mapperService = indexShard.mapperService();
             final Map<String, FieldMapper<?>> warmUpGlobalOrdinals = new HashMap<>();
-            for (DocumentMapper docMapper : mapperService) {
+            for (DocumentMapper docMapper : mapperService.docMappers(false)) {
                 for (FieldMapper<?> fieldMapper : docMapper.mappers().mappers()) {
                     final FieldDataType fieldDataType = fieldMapper.fieldDataType();
                     if (fieldDataType == null) {

@@ -19,19 +19,12 @@
 
 package org.elasticsearch.index.fielddata.plain;
 
-import org.apache.lucene.index.AtomicReader;
-import org.apache.lucene.index.FilterAtomicReader;
-import org.apache.lucene.index.SortedSetDocValues;
-import org.apache.lucene.index.TermsEnum;
+import org.apache.lucene.index.*;
 import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.BytesRef;
-import org.apache.lucene.util.LongsRef;
 import org.elasticsearch.ElasticsearchIllegalStateException;
-import org.elasticsearch.common.util.BigArrays;
-import org.elasticsearch.common.util.IntArray;
 import org.elasticsearch.index.fielddata.AtomicFieldData;
 import org.elasticsearch.index.fielddata.BytesValues;
-import org.elasticsearch.index.fielddata.ordinals.Ordinals;
 
 import java.io.IOException;
 
@@ -44,29 +37,26 @@ abstract class SortedSetDVAtomicFieldData {
 
     private final AtomicReader reader;
     private final String field;
-    private volatile IntArray hashes;
+    private final boolean multiValued;
+    private final long valueCount;
 
     SortedSetDVAtomicFieldData(AtomicReader reader, String field) {
         this.reader = reader;
         this.field = field;
+        SortedSetDocValues dv = getValuesNoException(reader, field);
+        this.multiValued = DocValues.unwrapSingleton(dv) == null;
+        this.valueCount = dv.getValueCount();
     }
 
     public boolean isMultiValued() {
-        // we could compute it when loading the values for the first time and then cache it but it would defeat the point of
-        // doc values which is to make loading faster
-        return true;
-    }
-
-    public int getNumDocs() {
-        return reader.maxDoc();
+        return multiValued;
     }
 
     public long getNumberUniqueValues() {
-        final SortedSetDocValues values = getValuesNoException(reader, field);
-        return values.getValueCount();
+        return valueCount;
     }
 
-    public long getMemorySizeInBytes() {
+    public long ramBytesUsed() {
         // There is no API to access memory usage per-field and RamUsageEstimator can't help since there are often references
         // from a per-field instance to all other instances handled by the same format
         return -1L;
@@ -76,225 +66,111 @@ abstract class SortedSetDVAtomicFieldData {
         // no-op
     }
 
-    public org.elasticsearch.index.fielddata.BytesValues.WithOrdinals getBytesValues(boolean needsHashes) {
+    public org.elasticsearch.index.fielddata.BytesValues.WithOrdinals getBytesValues() {
         final SortedSetDocValues values = getValuesNoException(reader, field);
-        return new SortedSetValues(reader, field, values);
-    }
-
-    public org.elasticsearch.index.fielddata.BytesValues.WithOrdinals getHashedBytesValues() {
-        final SortedSetDocValues values = getValuesNoException(reader, field);
-        if (hashes == null) {
-            synchronized (this) {
-                if (hashes == null) {
-                    final long valueCount = values.getValueCount();
-                    final IntArray hashes = BigArrays.NON_RECYCLING_INSTANCE.newIntArray(1L + valueCount);
-                    BytesRef scratch = new BytesRef(16);
-                    hashes.set(0, scratch.hashCode());
-                    for (long i = 0; i < valueCount; ++i) {
-                        values.lookupOrd(i, scratch);
-                        hashes.set(1L + i, scratch.hashCode());
-                    }
-                    this.hashes = hashes;
-                }
-            }
+        if (values instanceof RandomAccessOrds) {
+            return new RandomAccessSortedSetValues((RandomAccessOrds)values, multiValued);
+        } else {
+            return new SortedSetValues(values, multiValued);
         }
-        return new SortedSetHashedValues(reader, field, values, hashes);
     }
 
     public TermsEnum getTermsEnum() {
-        final TermsEnum termsEnum = getValuesNoException(reader, field).termsEnum();
-        return new FilterAtomicReader.FilterTermsEnum(termsEnum) {
-
-            @Override
-            public void seekExact(long ord) throws IOException {
-                super.seekExact(ord - 1);
-            }
-
-            @Override
-            public long ord() throws IOException {
-                return super.ord() + 1;
-            }
-
-        };
+        return getValuesNoException(reader, field).termsEnum();
     }
 
     private static SortedSetDocValues getValuesNoException(AtomicReader reader, String field) {
         try {
-            SortedSetDocValues values = reader.getSortedSetDocValues(field);
-            if (values == null) {
-                // This field has not been populated
-                assert reader.getFieldInfos().fieldInfo(field) == null;
-                values = SortedSetDocValues.EMPTY;
-            }
-            return values;
+            return DocValues.getSortedSet(reader, field);
         } catch (IOException e) {
             throw new ElasticsearchIllegalStateException("Couldn't load doc values", e);
         }
     }
-
-    static class SortedSetValues extends BytesValues.WithOrdinals {
-
-        protected final SortedSetDocValues values;
-
-        SortedSetValues(AtomicReader reader, String field, SortedSetDocValues values) {
-            super(new SortedSetDocs(new SortedSetOrdinals(reader, field, values.getValueCount()), values));
+    
+    private final static class RandomAccessSortedSetValues extends BytesValues.WithOrdinals {
+        private final RandomAccessOrds values;
+        private int index = 0;
+        
+        RandomAccessSortedSetValues(RandomAccessOrds values, boolean multiValued) {
+            super(multiValued);
             this.values = values;
         }
 
         @Override
-        public BytesRef getValueByOrd(long ord) {
-            assert ord != Ordinals.MISSING_ORDINAL;
-            values.lookupOrd(ord - 1, scratch);
-            return scratch;
-        }
-
-        @Override
-        public BytesRef nextValue() {
-            values.lookupOrd(ordinals.nextOrd()-1, scratch);
-            return scratch;
-        }
-    }
-
-    static final class SortedSetHashedValues extends SortedSetValues {
-
-        private final IntArray hashes;
-
-        SortedSetHashedValues(AtomicReader reader, String field, SortedSetDocValues values, IntArray hashes) {
-            super(reader, field, values);
-            this.hashes = hashes;
-        }
-
-        @Override
-        public int currentValueHash() {
-            assert ordinals.currentOrd() >= 0;
-            return hashes.get(ordinals.currentOrd());
-        }
-    }
-
-    static final class SortedSetOrdinals implements Ordinals {
-
-        // We don't store SortedSetDocValues as a member because Ordinals must be thread-safe
-        private final AtomicReader reader;
-        private final String field;
-        private final long numOrds;
-
-        public SortedSetOrdinals(AtomicReader reader, String field, long numOrds) {
-            super();
-            this.reader = reader;
-            this.field = field;
-            this.numOrds = numOrds;
-        }
-
-        @Override
-        public long getMemorySizeInBytes() {
-            // Ordinals can't be distinguished from the atomic field data instance
-            return -1;
-        }
-
-        @Override
-        public boolean isMultiValued() {
-            return true;
-        }
-
-        @Override
-        public int getNumDocs() {
-            return reader.maxDoc();
-        }
-
-        @Override
-        public long getNumOrds() {
-            return numOrds;
-        }
-
-        @Override
         public long getMaxOrd() {
-            return 1 + numOrds;
-        }
-
-        @Override
-        public Docs ordinals() {
-            final SortedSetDocValues values = getValuesNoException(reader, field);
-            assert values.getValueCount() == numOrds;
-            return new SortedSetDocs(this, values);
-        }
-
-    }
-
-    static class SortedSetDocs implements Ordinals.Docs {
-
-        private final SortedSetOrdinals ordinals;
-        private final SortedSetDocValues values;
-        private final LongsRef longScratch;
-        private int ordIndex = Integer.MAX_VALUE;
-        private long currentOrdinal = -1;
-
-        SortedSetDocs(SortedSetOrdinals ordinals, SortedSetDocValues values) {
-            this.ordinals = ordinals;
-            this.values = values;
-            longScratch = new LongsRef(8);
-        }
-
-        @Override
-        public Ordinals ordinals() {
-            return ordinals;
-        }
-
-        @Override
-        public int getNumDocs() {
-            return ordinals.getNumDocs();
-        }
-
-        @Override
-        public long getNumOrds() {
-            return ordinals.getNumOrds();
-        }
-
-        @Override
-        public long getMaxOrd() {
-            return ordinals.getMaxOrd();
-        }
-
-        @Override
-        public boolean isMultiValued() {
-            return ordinals.isMultiValued();
+            return values.getValueCount();
         }
 
         @Override
         public long getOrd(int docId) {
             values.setDocument(docId);
-            return currentOrdinal = 1 + values.nextOrd();
-        }
-
-        @Override
-        public LongsRef getOrds(int docId) {
-            values.setDocument(docId);
-            longScratch.offset = 0;
-            longScratch.length = 0;
-            for (long ord = values.nextOrd(); ord != SortedSetDocValues.NO_MORE_ORDS; ord = values.nextOrd()) {
-                longScratch.longs = ArrayUtil.grow(longScratch.longs, longScratch.length + 1);
-                longScratch.longs[longScratch.length++] = 1 + ord;
-            }
-            return longScratch;
+            return values.nextOrd();
         }
 
         @Override
         public long nextOrd() {
-            assert ordIndex < longScratch.length;
-            return currentOrdinal = longScratch.longs[ordIndex++];
+            return values.ordAt(index++);
+        }
+
+        @Override
+        public BytesRef getValueByOrd(long ord) {
+            return values.lookupOrd(ord);
+        }
+
+        @Override
+        public int setDocument(int docId) {
+            values.setDocument(docId);
+            index = 0;
+            return values.cardinality();
+        }
+    }
+
+    private final static class SortedSetValues extends BytesValues.WithOrdinals {
+
+        private final SortedSetDocValues values;
+        private long[] ords;
+        private int ordIndex = Integer.MAX_VALUE;
+
+        SortedSetValues(SortedSetDocValues values, boolean multiValued) {
+            super(multiValued);
+            this.values = values;
+            ords = new long[0];
+        }
+
+        @Override
+        public long getMaxOrd() {
+            return values.getValueCount();
+        }
+
+        @Override
+        public long getOrd(int docId) {
+            values.setDocument(docId);
+            return values.nextOrd();
+        }
+
+        @Override
+        public long nextOrd() {
+            assert ordIndex < ords.length;
+            return ords[ordIndex++];
         }
 
         @Override
         public int setDocument(int docId) {
             // For now, we consume all ords and pass them to the iter instead of doing it in a streaming way because Lucene's
             // SORTED_SET doc values are cached per thread, you can't have a fully independent instance
-            final LongsRef ords = getOrds(docId);
+            values.setDocument(docId);
+            int i = 0;
+            for (long ord = values.nextOrd(); ord != SortedSetDocValues.NO_MORE_ORDS; ord = values.nextOrd()) {
+                ords = ArrayUtil.grow(ords, i + 1);
+                ords[i++] = ord;
+            }
             ordIndex = 0;
-            return ords.length;
+            return i;
         }
 
         @Override
-        public long currentOrd() {
-            return currentOrdinal;
+        public BytesRef getValueByOrd(long ord) {
+            return values.lookupOrd(ord);
         }
     }
 }

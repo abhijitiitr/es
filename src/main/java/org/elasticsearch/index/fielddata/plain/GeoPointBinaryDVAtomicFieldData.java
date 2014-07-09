@@ -19,7 +19,6 @@
 
 package org.elasticsearch.index.fielddata.plain;
 
-import org.apache.lucene.index.AtomicReader;
 import org.apache.lucene.index.BinaryDocValues;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.geo.GeoPoint;
@@ -30,32 +29,15 @@ import org.elasticsearch.index.fielddata.ScriptDocValues;
 
 final class GeoPointBinaryDVAtomicFieldData extends AtomicGeoPointFieldData<ScriptDocValues> {
 
-    private final AtomicReader reader;
     private final BinaryDocValues values;
 
-    GeoPointBinaryDVAtomicFieldData(AtomicReader reader, BinaryDocValues values) {
+    GeoPointBinaryDVAtomicFieldData(BinaryDocValues values) {
         super();
-        this.reader = reader;
-        this.values = values == null ? BinaryDocValues.EMPTY : values;
+        this.values = values;
     }
 
     @Override
-    public boolean isMultiValued() {
-        return false;
-    }
-
-    @Override
-    public int getNumDocs() {
-        return reader.maxDoc();
-    }
-
-    @Override
-    public long getNumberUniqueValues() {
-        return Long.MAX_VALUE;
-    }
-
-    @Override
-    public long getMemorySizeInBytes() {
+    public long ramBytesUsed() {
         return -1; // not exposed by Lucene
     }
 
@@ -73,14 +55,14 @@ final class GeoPointBinaryDVAtomicFieldData extends AtomicGeoPointFieldData<Scri
     public GeoPointValues getGeoPointValues() {
         return new GeoPointValues(true) {
 
-            final BytesRef bytes = new BytesRef();
+            BytesRef bytes;
             int i = Integer.MAX_VALUE;
             int valueCount = 0;
             final GeoPoint point = new GeoPoint();
 
             @Override
             public int setDocument(int docId) {
-                values.get(docId, bytes);
+                bytes = values.get(docId);
                 assert bytes.length % 16 == 0;
                 i = 0;
                 return valueCount = (bytes.length >>> 4);

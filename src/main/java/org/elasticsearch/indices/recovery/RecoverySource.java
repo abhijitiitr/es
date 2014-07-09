@@ -26,10 +26,14 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.IOUtils;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.cluster.ClusterService;
+import org.elasticsearch.cluster.action.index.MappingUpdatedAction;
+import org.elasticsearch.cluster.metadata.IndexMetaData;
+import org.elasticsearch.cluster.metadata.MappingMetaData;
 import org.elasticsearch.cluster.routing.RoutingNode;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.common.StopWatch;
 import org.elasticsearch.common.bytes.BytesArray;
+import org.elasticsearch.common.collect.ImmutableOpenMap;
 import org.elasticsearch.common.component.AbstractComponent;
 import org.elasticsearch.common.compress.CompressorFactory;
 import org.elasticsearch.common.inject.Inject;
@@ -38,6 +42,8 @@ import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.index.deletionpolicy.SnapshotIndexCommit;
 import org.elasticsearch.index.engine.Engine;
+import org.elasticsearch.index.mapper.DocumentMapper;
+import org.elasticsearch.index.service.IndexService;
 import org.elasticsearch.index.shard.IllegalIndexShardStateException;
 import org.elasticsearch.index.shard.IndexShardClosedException;
 import org.elasticsearch.index.shard.IndexShardState;
@@ -53,6 +59,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -68,6 +75,7 @@ public class RecoverySource extends AbstractComponent {
     private final TransportService transportService;
     private final IndicesService indicesService;
     private final RecoverySettings recoverySettings;
+    private final MappingUpdatedAction mappingUpdatedAction;
 
     private final ClusterService clusterService;
 
@@ -77,10 +85,11 @@ public class RecoverySource extends AbstractComponent {
 
     @Inject
     public RecoverySource(Settings settings, TransportService transportService, IndicesService indicesService,
-                          RecoverySettings recoverySettings, ClusterService clusterService) {
+                          RecoverySettings recoverySettings, MappingUpdatedAction mappingUpdatedAction, ClusterService clusterService) {
         super(settings);
         this.transportService = transportService;
         this.indicesService = indicesService;
+        this.mappingUpdatedAction = mappingUpdatedAction;
         this.clusterService = clusterService;
 
         this.recoverySettings = recoverySettings;
@@ -91,12 +100,14 @@ public class RecoverySource extends AbstractComponent {
     }
 
     private RecoveryResponse recover(final StartRecoveryRequest request) {
-        final InternalIndexShard shard = (InternalIndexShard) indicesService.indexServiceSafe(request.shardId().index().name()).shardSafe(request.shardId().id());
+        final IndexService indexService = indicesService.indexServiceSafe(request.shardId().index().name());
+        final InternalIndexShard shard = (InternalIndexShard) indexService.shardSafe(request.shardId().id());
 
         // verify that our (the source) shard state is marking the shard to be in recovery mode as well, otherwise
         // the index operations will not be routed to it properly
         RoutingNode node = clusterService.state().readOnlyRoutingNodes().node(request.targetNode().id());
         if (node == null) {
+            logger.debug("delaying recovery of {} as source node {} is unknown", request.shardId(), request.targetNode());
             throw new DelayRecoveryException("source node does not have the node [" + request.targetNode() + "] in its state yet..");
         }
         ShardRouting targetShardRouting = null;
@@ -107,9 +118,12 @@ public class RecoverySource extends AbstractComponent {
             }
         }
         if (targetShardRouting == null) {
+            logger.debug("delaying recovery of {} as it is not listed as assigned to target node {}", request.shardId(), request.targetNode());
             throw new DelayRecoveryException("source node does not have the shard listed in its state as allocated on the node");
         }
         if (!targetShardRouting.initializing()) {
+            logger.debug("delaying recovery of {} as it is not listed as initializing on the target node {}. known shards state is [{}]",
+                    request.shardId(), request.targetNode(), targetShardRouting.state());
             throw new DelayRecoveryException("source node has the state of the target shard to be [" + targetShardRouting.state() + "], expecting to be [initializing]");
         }
 
@@ -247,20 +261,71 @@ public class RecoverySource extends AbstractComponent {
                 if (shard.state() == IndexShardState.CLOSED) {
                     throw new IndexShardClosedException(request.shardId());
                 }
-                logger.trace("[{}][{}] recovery [phase2] to {}: start", request.shardId().index().name(), request.shardId().id(), request.targetNode());
+                logger.trace("{} recovery [phase2] to {}: start", request.shardId(), request.targetNode());
                 StopWatch stopWatch = new StopWatch().start();
                 transportService.submitRequest(request.targetNode(), RecoveryTarget.Actions.PREPARE_TRANSLOG, new RecoveryPrepareForTranslogOperationsRequest(request.recoveryId(), request.shardId()), TransportRequestOptions.options().withTimeout(internalActionTimeout), EmptyTransportResponseHandler.INSTANCE_SAME).txGet();
                 stopWatch.stop();
                 response.startTime = stopWatch.totalTime().millis();
-                logger.trace("[{}][{}] recovery [phase2] to {}: start took [{}]", request.shardId().index().name(), request.shardId().id(), request.targetNode(), stopWatch.totalTime());
+                logger.trace("{} recovery [phase2] to {}: start took [{}]", request.shardId(), request.targetNode(), request.targetNode(), stopWatch.totalTime());
 
-                logger.trace("[{}][{}] recovery [phase2] to {}: sending transaction log operations", request.shardId().index().name(), request.shardId().id(), request.targetNode());
+
+                logger.trace("{} recovery [phase2] to {}: updating current mapping to master", request.shardId(), request.targetNode());
+                updateMappingOnMaster();
+
+                logger.trace("{} recovery [phase2] to {}: sending transaction log operations", request.shardId(), request.targetNode());
                 stopWatch = new StopWatch().start();
                 int totalOperations = sendSnapshot(snapshot);
                 stopWatch.stop();
-                logger.trace("[{}][{}] recovery [phase2] to {}: took [{}]", request.shardId().index().name(), request.shardId().id(), request.targetNode(), stopWatch.totalTime());
+                logger.trace("{} recovery [phase2] to {}: took [{}]", request.shardId(), request.targetNode(), stopWatch.totalTime());
                 response.phase2Time = stopWatch.totalTime().millis();
                 response.phase2Operations = totalOperations;
+            }
+
+            private void updateMappingOnMaster() {
+                IndexMetaData indexMetaData = clusterService.state().metaData().getIndices().get(indexService.index().getName());
+                ImmutableOpenMap<String, MappingMetaData> metaDataMappings = null;
+                if (indexMetaData != null) {
+                    metaDataMappings = indexMetaData.getMappings();
+                }
+                List<DocumentMapper> documentMappersToUpdate = Lists.newArrayList();
+                // default mapping should not be sent back, it can only be updated by put mapping API, and its
+                // a full in place replace, we don't want to override a potential update coming it
+                for (DocumentMapper documentMapper : indexService.mapperService().docMappers(false)) {
+
+                    MappingMetaData mappingMetaData = metaDataMappings == null ? null : metaDataMappings.get(documentMapper.type());
+                    if (mappingMetaData == null || !documentMapper.refreshSource().equals(mappingMetaData.source())) {
+                        // not on master yet in the right form
+                        documentMappersToUpdate.add(documentMapper);
+                    }
+                }
+                if (documentMappersToUpdate.isEmpty()) {
+                    return;
+                }
+                final CountDownLatch countDownLatch = new CountDownLatch(documentMappersToUpdate.size());
+                MappingUpdatedAction.MappingUpdateListener listener = new MappingUpdatedAction.MappingUpdateListener() {
+                    @Override
+                    public void onMappingUpdate() {
+                        countDownLatch.countDown();
+                    }
+
+                    @Override
+                    public void onFailure(Throwable t) {
+                        logger.debug("{} recovery to {}: failed to update mapping on master", request.shardId(), request.targetNode(), t);
+                        countDownLatch.countDown();
+                    }
+                };
+                for (DocumentMapper documentMapper : documentMappersToUpdate) {
+                    mappingUpdatedAction.updateMappingOnMaster(indexService.index().getName(), documentMapper, indexService.indexUUID(), listener);
+                }
+                try {
+                    if (!countDownLatch.await(internalActionTimeout.millis(), TimeUnit.MILLISECONDS)) {
+                        logger.debug("{} recovery [phase2] to {}: waiting on pending mapping update timed out. waited [{}]", request.shardId(), request.targetNode(), internalActionTimeout);
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    logger.debug("interrupted while waiting for mapping to update on master");
+                }
+
             }
 
             @Override

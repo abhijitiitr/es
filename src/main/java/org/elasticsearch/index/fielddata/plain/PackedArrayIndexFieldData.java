@@ -35,15 +35,14 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.fielddata.*;
 import org.elasticsearch.index.fielddata.fieldcomparator.LongValuesComparatorSource;
-import org.elasticsearch.index.fielddata.fieldcomparator.SortMode;
 import org.elasticsearch.index.fielddata.ordinals.GlobalOrdinalsBuilder;
 import org.elasticsearch.index.fielddata.ordinals.Ordinals;
-import org.elasticsearch.index.fielddata.ordinals.Ordinals.Docs;
 import org.elasticsearch.index.fielddata.ordinals.OrdinalsBuilder;
 import org.elasticsearch.index.mapper.FieldMapper;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.settings.IndexSettings;
 import org.elasticsearch.indices.fielddata.breaker.CircuitBreakerService;
+import org.elasticsearch.search.MultiValueMode;
 
 import java.io.IOException;
 import java.util.EnumSet;
@@ -99,10 +98,10 @@ public class PackedArrayIndexFieldData extends AbstractIndexFieldData<AtomicNume
         AtomicReader reader = context.reader();
         Terms terms = reader.terms(getFieldNames().indexName());
         PackedArrayAtomicFieldData data = null;
-        PackedArrayEstimator estimator = new PackedArrayEstimator(breakerService.getBreaker(), getNumericType());
+        PackedArrayEstimator estimator = new PackedArrayEstimator(breakerService.getBreaker(), getNumericType(), getFieldNames().fullName());
         if (terms == null) {
-            data = PackedArrayAtomicFieldData.empty(reader.maxDoc());
-            estimator.adjustForNoTerms(data.getMemorySizeInBytes());
+            data = PackedArrayAtomicFieldData.empty();
+            estimator.adjustForNoTerms(data.ramBytesUsed());
             return data;
         }
         // TODO: how can we guess the number of terms? numerics end up creating more terms per value...
@@ -128,10 +127,10 @@ public class PackedArrayIndexFieldData extends AbstractIndexFieldData<AtomicNume
             Ordinals build = builder.build(fieldDataType.getSettings());
             CommonSettings.MemoryStorageFormat formatHint = CommonSettings.getMemoryStorageHint(fieldDataType);
 
-            if (build.isMultiValued() || formatHint == CommonSettings.MemoryStorageFormat.ORDINALS) {
-                data = new PackedArrayAtomicFieldData.WithOrdinals(values, reader.maxDoc(), build);
+            BytesValues.WithOrdinals ordinals = build.ordinals();
+            if (ordinals.isMultiValued() || formatHint == CommonSettings.MemoryStorageFormat.ORDINALS) {
+                data = new PackedArrayAtomicFieldData.WithOrdinals(values, build);
             } else {
-                Docs ordinals = build.ordinals();
                 final FixedBitSet docsWithValues = builder.buildDocsWithValuesSet();
 
                 long minValue, maxValue;
@@ -185,15 +184,15 @@ public class PackedArrayIndexFieldData extends AbstractIndexFieldData<AtomicNume
 
                         for (int i = 0; i < reader.maxDoc(); i++) {
                             final long ord = ordinals.getOrd(i);
-                            if (ord != Ordinals.MISSING_ORDINAL) {
-                                long value = values.get(ord - 1);
+                            if (ord != BytesValues.WithOrdinals.MISSING_ORDINAL) {
+                                long value = values.get(ord);
                                 sValues.set(i, value - minValue);
                             }
                         }
                         if (docsWithValues == null) {
-                            data = new PackedArrayAtomicFieldData.Single(sValues, minValue, reader.maxDoc(), ordinals.getNumOrds());
+                            data = new PackedArrayAtomicFieldData.Single(sValues, minValue);
                         } else {
-                            data = new PackedArrayAtomicFieldData.SingleSparse(sValues, minValue, reader.maxDoc(), missingValue, ordinals.getNumOrds());
+                            data = new PackedArrayAtomicFieldData.SingleSparse(sValues, minValue, missingValue);
                         }
                         break;
                     case PAGED:
@@ -203,20 +202,20 @@ public class PackedArrayIndexFieldData extends AbstractIndexFieldData<AtomicNume
                         long lastValue = 0;
                         for (int i = 0; i < reader.maxDoc(); i++) {
                             final long ord = ordinals.getOrd(i);
-                            if (ord != Ordinals.MISSING_ORDINAL) {
-                                lastValue = values.get(ord - 1);
+                            if (ord != BytesValues.WithOrdinals.MISSING_ORDINAL) {
+                                lastValue = values.get(ord);
                             }
                             dpValues.add(lastValue);
                         }
                         dpValues.freeze();
                         if (docsWithValues == null) {
-                            data = new PackedArrayAtomicFieldData.PagedSingle(dpValues, reader.maxDoc(), ordinals.getNumOrds());
+                            data = new PackedArrayAtomicFieldData.PagedSingle(dpValues);
                         } else {
-                            data = new PackedArrayAtomicFieldData.PagedSingleSparse(dpValues, reader.maxDoc(), docsWithValues, ordinals.getNumOrds());
+                            data = new PackedArrayAtomicFieldData.PagedSingleSparse(dpValues, docsWithValues);
                         }
                         break;
                     case ORDINALS:
-                        data = new PackedArrayAtomicFieldData.WithOrdinals(values, reader.maxDoc(), build);
+                        data = new PackedArrayAtomicFieldData.WithOrdinals(values, build);
                         break;
                     default:
                         throw new ElasticsearchException("unknown memory format: " + formatHint);
@@ -232,14 +231,14 @@ public class PackedArrayIndexFieldData extends AbstractIndexFieldData<AtomicNume
                 estimator.afterLoad(termsEnum, 0);
             } else {
                 // Adjust as usual, based on the actual size of the field data
-                estimator.afterLoad(termsEnum, data.getMemorySizeInBytes());
+                estimator.afterLoad(termsEnum, data.ramBytesUsed());
             }
 
         }
 
     }
 
-    protected CommonSettings.MemoryStorageFormat chooseStorageFormat(AtomicReader reader, MonotonicAppendingLongBuffer values, Ordinals build, Docs ordinals,
+    protected CommonSettings.MemoryStorageFormat chooseStorageFormat(AtomicReader reader, MonotonicAppendingLongBuffer values, Ordinals build, BytesValues.WithOrdinals ordinals,
                                                                      long minValue, long maxValue, float acceptableOverheadRatio, int pageSize) {
 
         CommonSettings.MemoryStorageFormat format;
@@ -252,7 +251,7 @@ public class PackedArrayIndexFieldData extends AbstractIndexFieldData<AtomicNume
         final long singleValuesSize = formatAndBits.format.longCount(PackedInts.VERSION_CURRENT, reader.maxDoc(), formatAndBits.bitsPerValue) * 8L;
 
         // ordinal memory usage
-        final long ordinalsSize = build.getMemorySizeInBytes() + values.ramBytesUsed();
+        final long ordinalsSize = build.ramBytesUsed() + values.ramBytesUsed();
 
         // estimate the memory signature of paged packing
         long pagedSingleValuesSize = (reader.maxDoc() / pageSize + 1) * RamUsageEstimator.NUM_BYTES_OBJECT_REF; // array of pages
@@ -261,7 +260,7 @@ public class PackedArrayIndexFieldData extends AbstractIndexFieldData<AtomicNume
         long pageMaxOrdinal = Long.MIN_VALUE;
         for (int i = 1; i < reader.maxDoc(); ++i, pageIndex = (pageIndex + 1) % pageSize) {
             long ordinal = ordinals.getOrd(i);
-            if (ordinal != Ordinals.MISSING_ORDINAL) {
+            if (ordinal != BytesValues.WithOrdinals.MISSING_ORDINAL) {
                 pageMaxOrdinal = Math.max(ordinal, pageMaxOrdinal);
                 pageMinOrdinal = Math.min(ordinal, pageMinOrdinal);
             }
@@ -305,8 +304,8 @@ public class PackedArrayIndexFieldData extends AbstractIndexFieldData<AtomicNume
             pageMemorySize += RamUsageEstimator.alignObjectSize(RamUsageEstimator.NUM_BYTES_OBJECT_HEADER + RamUsageEstimator.NUM_BYTES_INT);
 
         } else {
-            long pageMinValue = values.get(pageMinOrdinal - 1);
-            long pageMaxValue = values.get(pageMaxOrdinal - 1);
+            long pageMinValue = values.get(pageMinOrdinal);
+            long pageMaxValue = values.get(pageMaxOrdinal);
             long pageDelta = pageMaxValue - pageMinValue;
             if (pageDelta != 0) {
                 bitsRequired = pageDelta < 0 ? 64 : PackedInts.bitsRequired(pageDelta);
@@ -322,7 +321,7 @@ public class PackedArrayIndexFieldData extends AbstractIndexFieldData<AtomicNume
     }
 
     @Override
-    public XFieldComparatorSource comparatorSource(@Nullable Object missingValue, SortMode sortMode) {
+    public XFieldComparatorSource comparatorSource(@Nullable Object missingValue, MultiValueMode sortMode) {
         return new LongValuesComparatorSource(this, missingValue, sortMode);
     }
 
@@ -335,10 +334,12 @@ public class PackedArrayIndexFieldData extends AbstractIndexFieldData<AtomicNume
 
         private final MemoryCircuitBreaker breaker;
         private final NumericType type;
+        private final String fieldName;
 
-        public PackedArrayEstimator(MemoryCircuitBreaker breaker, NumericType type) {
+        public PackedArrayEstimator(MemoryCircuitBreaker breaker, NumericType type, String fieldName) {
             this.breaker = breaker;
             this.type = type;
+            this.fieldName = fieldName;
         }
 
         /**
@@ -357,7 +358,7 @@ public class PackedArrayIndexFieldData extends AbstractIndexFieldData<AtomicNume
          */
         @Override
         public TermsEnum beforeLoad(Terms terms) throws IOException {
-            return new RamAccountingTermsEnum(type.wrapTermsEnum(terms.iterator(null)), breaker, this);
+            return new RamAccountingTermsEnum(type.wrapTermsEnum(terms.iterator(null)), breaker, this, this.fieldName);
         }
 
         /**

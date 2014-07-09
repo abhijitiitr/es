@@ -170,10 +170,6 @@ public class ParentFieldMapper extends AbstractFieldMapper<Uid> implements Inter
     }
 
     @Override
-    public void validate(ParseContext context) throws MapperParsingException {
-    }
-
-    @Override
     public boolean includeInObject() {
         return true;
     }
@@ -267,7 +263,7 @@ public class ParentFieldMapper extends AbstractFieldMapper<Uid> implements Inter
         }
 
         List<String> types = new ArrayList<>(context.mapperService().types().size());
-        for (DocumentMapper documentMapper : context.mapperService()) {
+        for (DocumentMapper documentMapper : context.mapperService().docMappers(false)) {
             if (!documentMapper.parentFieldMapper().active()) {
                 types.add(documentMapper.type());
             }
@@ -298,7 +294,7 @@ public class ParentFieldMapper extends AbstractFieldMapper<Uid> implements Inter
         }
 
         List<String> types = new ArrayList<>(context.mapperService().types().size());
-        for (DocumentMapper documentMapper : context.mapperService()) {
+        for (DocumentMapper documentMapper : context.mapperService().docMappers(false)) {
             if (!documentMapper.parentFieldMapper().active()) {
                 types.add(documentMapper.type());
             }

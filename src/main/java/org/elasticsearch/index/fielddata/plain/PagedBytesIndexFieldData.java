@@ -18,7 +18,8 @@
  */
 package org.elasticsearch.index.fielddata.plain;
 
-import org.apache.lucene.codecs.BlockTreeTermsReader;
+import org.apache.lucene.codecs.blocktree.FieldReader;
+import org.apache.lucene.codecs.blocktree.Stats;
 import org.apache.lucene.index.*;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.PagedBytes;
@@ -26,7 +27,6 @@ import org.apache.lucene.util.packed.MonotonicAppendingLongBuffer;
 import org.elasticsearch.common.breaker.MemoryCircuitBreaker;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.index.Index;
-import org.elasticsearch.index.fielddata.RamAccountingTermsEnum;
 import org.elasticsearch.index.fielddata.*;
 import org.elasticsearch.index.fielddata.ordinals.GlobalOrdinalsBuilder;
 import org.elasticsearch.index.fielddata.ordinals.Ordinals;
@@ -40,13 +40,13 @@ import java.io.IOException;
 
 /**
  */
-public class PagedBytesIndexFieldData extends AbstractBytesIndexFieldData<PagedBytesAtomicFieldData> {
+public class PagedBytesIndexFieldData extends AbstractBytesIndexFieldData<AtomicFieldData.WithOrdinals<ScriptDocValues.Strings>> {
 
 
     public static class Builder implements IndexFieldData.Builder {
 
         @Override
-        public IndexFieldData<PagedBytesAtomicFieldData> build(Index index, @IndexSettings Settings indexSettings, FieldMapper<?> mapper,
+        public IndexFieldData<AtomicFieldData.WithOrdinals<ScriptDocValues.Strings>> build(Index index, @IndexSettings Settings indexSettings, FieldMapper<?> mapper,
                                                                IndexFieldDataCache cache, CircuitBreakerService breakerService, MapperService mapperService,
                                                                GlobalOrdinalsBuilder globalOrdinalBuilder) {
             return new PagedBytesIndexFieldData(index, indexSettings, mapper.names(), mapper.fieldDataType(), cache, breakerService, globalOrdinalBuilder);
@@ -60,21 +60,19 @@ public class PagedBytesIndexFieldData extends AbstractBytesIndexFieldData<PagedB
     }
 
     @Override
-    public PagedBytesAtomicFieldData loadDirect(AtomicReaderContext context) throws Exception {
+    public AtomicFieldData.WithOrdinals<ScriptDocValues.Strings> loadDirect(AtomicReaderContext context) throws Exception {
         AtomicReader reader = context.reader();
 
-        PagedBytesEstimator estimator = new PagedBytesEstimator(context, breakerService.getBreaker());
+        PagedBytesEstimator estimator = new PagedBytesEstimator(context, breakerService.getBreaker(), getFieldNames().fullName());
         Terms terms = reader.terms(getFieldNames().indexName());
         if (terms == null) {
-            PagedBytesAtomicFieldData emptyData = PagedBytesAtomicFieldData.empty(reader.maxDoc());
-            estimator.adjustForNoTerms(emptyData.getMemorySizeInBytes());
-            return emptyData;
+            estimator.afterLoad(null, AtomicFieldData.WithOrdinals.EMPTY.ramBytesUsed());
+            return AtomicFieldData.WithOrdinals.EMPTY;
         }
 
         final PagedBytes bytes = new PagedBytes(15);
 
         final MonotonicAppendingLongBuffer termOrdToBytesOffset = new MonotonicAppendingLongBuffer();
-        termOrdToBytesOffset.add(0); // first ord is reserved for missing values
         final long numTerms;
         if (regex == null && frequency == null) {
             numTerms = terms.size();
@@ -118,7 +116,7 @@ public class PagedBytesIndexFieldData extends AbstractBytesIndexFieldData<PagedB
                 estimator.afterLoad(termsEnum, 0);
             } else {
                 // Call .afterLoad() to adjust the breaker now that we have an exact size
-                estimator.afterLoad(termsEnum, data.getMemorySizeInBytes());
+                estimator.afterLoad(termsEnum, data.ramBytesUsed());
             }
 
         }
@@ -133,11 +131,13 @@ public class PagedBytesIndexFieldData extends AbstractBytesIndexFieldData<PagedB
 
         private final AtomicReaderContext context;
         private final MemoryCircuitBreaker breaker;
+        private final String fieldName;
         private long estimatedBytes;
 
-        PagedBytesEstimator(AtomicReaderContext context, MemoryCircuitBreaker breaker) {
+        PagedBytesEstimator(AtomicReaderContext context, MemoryCircuitBreaker breaker, String fieldName) {
             this.breaker = breaker;
             this.context = context;
+            this.fieldName = fieldName;
         }
 
         /**
@@ -166,8 +166,8 @@ public class PagedBytesIndexFieldData extends AbstractBytesIndexFieldData<PagedB
                 Fields fields = reader.fields();
                 final Terms fieldTerms = fields.terms(getFieldNames().indexName());
 
-                if (fieldTerms instanceof BlockTreeTermsReader.FieldReader) {
-                    final BlockTreeTermsReader.Stats stats = ((BlockTreeTermsReader.FieldReader) fieldTerms).computeStats();
+                if (fieldTerms instanceof FieldReader) {
+                    final Stats stats = ((FieldReader) fieldTerms).computeStats();
                     long totalTermBytes = stats.totalTermBytes;
                     if (logger.isTraceEnabled()) {
                         logger.trace("totalTermBytes: {}, terms.size(): {}, terms.getSumDocFreq(): {}",
@@ -210,15 +210,15 @@ public class PagedBytesIndexFieldData extends AbstractBytesIndexFieldData<PagedB
                 if (logger.isTraceEnabled()) {
                     logger.trace("Filter exists, can't circuit break normally, using RamAccountingTermsEnum");
                 }
-                return new RamAccountingTermsEnum(filter(terms, reader), breaker, this);
+                return new RamAccountingTermsEnum(filter(terms, reader), breaker, this, this.fieldName);
             } else {
                 estimatedBytes = this.estimateStringFieldData();
                 // If we weren't able to estimate, wrap in the RamAccountingTermsEnum
                 if (estimatedBytes == 0) {
-                    return new RamAccountingTermsEnum(filter(terms, reader), breaker, this);
+                    return new RamAccountingTermsEnum(filter(terms, reader), breaker, this, this.fieldName);
                 }
 
-                breaker.addEstimateBytesAndMaybeBreak(estimatedBytes);
+                breaker.addEstimateBytesAndMaybeBreak(estimatedBytes, fieldName);
                 return filter(terms, reader);
             }
         }

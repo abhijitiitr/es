@@ -21,6 +21,7 @@ package org.elasticsearch.action.admin.cluster.snapshots.restore;
 
 import org.elasticsearch.ElasticsearchGenerationException;
 import org.elasticsearch.ElasticsearchIllegalArgumentException;
+import org.elasticsearch.Version;
 import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.action.support.master.MasterNodeOperationRequest;
@@ -57,7 +58,7 @@ public class RestoreSnapshotRequest extends MasterNodeOperationRequest<RestoreSn
 
     private String[] indices = Strings.EMPTY_ARRAY;
 
-    private IndicesOptions indicesOptions = IndicesOptions.strict();
+    private IndicesOptions indicesOptions = IndicesOptions.strictExpandOpen();
 
     private String renamePattern;
 
@@ -66,6 +67,8 @@ public class RestoreSnapshotRequest extends MasterNodeOperationRequest<RestoreSn
     private boolean waitForCompletion;
 
     private boolean includeGlobalState = true;
+
+    private boolean partial = false;
 
     private Settings settings = EMPTY_SETTINGS;
 
@@ -273,6 +276,26 @@ public class RestoreSnapshotRequest extends MasterNodeOperationRequest<RestoreSn
     }
 
     /**
+     * Returns true if indices with failed to snapshot shards should be partially restored.
+     *
+     * @return true if indices with failed to snapshot shards should be partially restored
+     */
+    public boolean partial() {
+        return partial;
+    }
+
+    /**
+     * Set to true to allow indices with failed to snapshot shards should be partially restored.
+     *
+     * @param partial true if indices with failed to snapshot shards should be partially restored.
+     * @return this request
+     */
+    public RestoreSnapshotRequest partial(boolean partial) {
+        this.partial = partial;
+        return this;
+    }
+
+    /**
      * Sets repository-specific restore settings.
      * <p/>
      * See repository documentation for more information.
@@ -382,10 +405,10 @@ public class RestoreSnapshotRequest extends MasterNodeOperationRequest<RestoreSn
      * @return this request
      */
     public RestoreSnapshotRequest source(Map source) {
-        boolean ignoreUnavailable = IndicesOptions.lenient().ignoreUnavailable();
-        boolean allowNoIndices = IndicesOptions.lenient().allowNoIndices();
-        boolean expandWildcardsOpen = IndicesOptions.lenient().expandWildcardsOpen();
-        boolean expandWildcardsClosed = IndicesOptions.lenient().expandWildcardsClosed();
+        boolean ignoreUnavailable = IndicesOptions.lenientExpandOpen().ignoreUnavailable();
+        boolean allowNoIndices = IndicesOptions.lenientExpandOpen().allowNoIndices();
+        boolean expandWildcardsOpen = IndicesOptions.lenientExpandOpen().expandWildcardsOpen();
+        boolean expandWildcardsClosed = IndicesOptions.lenientExpandOpen().expandWildcardsClosed();
 
         for (Map.Entry<String, Object> entry : ((Map<String, Object>) source).entrySet()) {
             String name = entry.getKey();
@@ -405,6 +428,8 @@ public class RestoreSnapshotRequest extends MasterNodeOperationRequest<RestoreSn
                 expandWildcardsOpen = nodeBooleanValue(entry.getValue());
             } else if (name.equals("expand_wildcards_closed") || name.equals("expandWildcardsClosed")) {
                 expandWildcardsClosed = nodeBooleanValue(entry.getValue());
+            } else if (name.equals("partial")) {
+                partial(nodeBooleanValue(entry.getValue()));
             } else if (name.equals("settings")) {
                 if (!(entry.getValue() instanceof Map)) {
                     throw new ElasticsearchIllegalArgumentException("malformed settings section, should indices an inner object");
@@ -511,6 +536,9 @@ public class RestoreSnapshotRequest extends MasterNodeOperationRequest<RestoreSn
         renameReplacement = in.readOptionalString();
         waitForCompletion = in.readBoolean();
         includeGlobalState = in.readBoolean();
+        if (in.getVersion().onOrAfter(Version.V_1_3_0)) {
+            partial = in.readBoolean();
+        }
         settings = readSettingsFromStream(in);
     }
 
@@ -525,6 +553,9 @@ public class RestoreSnapshotRequest extends MasterNodeOperationRequest<RestoreSn
         out.writeOptionalString(renameReplacement);
         out.writeBoolean(waitForCompletion);
         out.writeBoolean(includeGlobalState);
+        if (out.getVersion().onOrAfter(Version.V_1_3_0)) {
+            out.writeBoolean(partial);
+        }
         writeSettingsToStream(settings, out);
     }
 }

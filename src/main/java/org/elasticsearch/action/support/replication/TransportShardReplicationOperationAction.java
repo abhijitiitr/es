@@ -37,6 +37,7 @@ import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.routing.ShardIterator;
 import org.elasticsearch.cluster.routing.ShardRouting;
+import org.elasticsearch.cluster.routing.ShardRoutingState;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
@@ -137,7 +138,7 @@ public abstract class TransportShardReplicationOperationAction<Request extends S
      * means a different execution, then return false here to indicate not to continue and execute this request.
      */
     protected boolean resolveRequest(ClusterState state, Request request, ActionListener<Response> listener) {
-        request.index(state.metaData().concreteIndex(request.index()));
+        request.index(state.metaData().concreteSingleIndex(request.index()));
         return true;
     }
 
@@ -559,7 +560,6 @@ public abstract class TransportShardReplicationOperationAction<Request extends S
                 listener.onResponse(response.response());
                 return;
             }
-
             ShardRouting shard;
 
             // we double check on the state, if it got changed we need to make sure we take the latest one cause
@@ -595,6 +595,16 @@ public abstract class TransportShardReplicationOperationAction<Request extends S
                         break;
                     }
                 }
+                shardIt.reset();
+                request.setCanHaveDuplicates(); // safe side, cluster state changed, we might have dups
+            } else{
+                shardIt.reset();
+                while ((shard = shardIt.nextOrNull()) != null) {
+                    if (shard.state() != ShardRoutingState.STARTED) {
+                        request.setCanHaveDuplicates();
+                    }
+                }
+                shardIt.reset();
             }
 
             // initialize the counter
@@ -686,6 +696,7 @@ public abstract class TransportShardReplicationOperationAction<Request extends S
 
                     @Override
                     public void handleException(TransportException exp) {
+                        logger.trace("[{}] Transport failure during replica request [{}] ", exp, node, request);
                         if (!ignoreReplicaException(exp.unwrapCause())) {
                             logger.warn("Failed to perform " + transportAction + " on remote replica " + node + shardIt.shardId(), exp);
                             shardStateAction.shardFailed(shard, indexMetaData.getUUID(),
@@ -747,6 +758,7 @@ public abstract class TransportShardReplicationOperationAction<Request extends S
     }
 
     private void failReplicaIfNeeded(String index, int shardId, Throwable t) {
+        logger.trace("failure on replica [{}][{}]", t, index, shardId);
         if (!ignoreReplicaException(t)) {
             IndexService indexService = indicesService.indexService(index);
             if (indexService == null) {

@@ -35,7 +35,6 @@ import org.apache.lucene.search.Filter;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.store.ByteArrayDataOutput;
 import org.apache.lucene.util.BytesRef;
-import org.apache.lucene.util.NumericUtils;
 import org.elasticsearch.common.Explicit;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.settings.Settings;
@@ -46,7 +45,6 @@ import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.index.analysis.NamedAnalyzer;
 import org.elasticsearch.index.codec.docvaluesformat.DocValuesFormatProvider;
 import org.elasticsearch.index.codec.postingsformat.PostingsFormatProvider;
-import org.elasticsearch.index.fielddata.IndexFieldDataService;
 import org.elasticsearch.index.fielddata.IndexNumericFieldData;
 import org.elasticsearch.index.mapper.*;
 import org.elasticsearch.index.mapper.internal.AllFieldMapper;
@@ -64,7 +62,11 @@ import java.util.List;
 public abstract class NumberFieldMapper<T extends Number> extends AbstractFieldMapper<T> implements AllFieldMapper.IncludeInAll {
 
     public static class Defaults extends AbstractFieldMapper.Defaults {
-        public static final int PRECISION_STEP = NumericUtils.PRECISION_STEP_DEFAULT;
+        
+        public static final int PRECISION_STEP_8_BIT  = Integer.MAX_VALUE; // 1tpv: 256 terms at most, not useful
+        public static final int PRECISION_STEP_16_BIT = 8;                 // 2tpv
+        public static final int PRECISION_STEP_32_BIT = 8;                 // 4tpv
+        public static final int PRECISION_STEP_64_BIT = 16;                // 4tpv
 
         public static final FieldType FIELD_TYPE = new FieldType(AbstractFieldMapper.Defaults.FIELD_TYPE);
 
@@ -82,18 +84,17 @@ public abstract class NumberFieldMapper<T extends Number> extends AbstractFieldM
 
     public abstract static class Builder<T extends Builder, Y extends NumberFieldMapper> extends AbstractFieldMapper.Builder<T, Y> {
 
-        protected int precisionStep = Defaults.PRECISION_STEP;
-
         private Boolean ignoreMalformed;
 
         private Boolean coerce;
         
-        public Builder(String name, FieldType fieldType) {
+        public Builder(String name, FieldType fieldType, int defaultPrecisionStep) {
             super(name, fieldType);
+            fieldType.setNumericPrecisionStep(defaultPrecisionStep);
         }
 
         public T precisionStep(int precisionStep) {
-            this.precisionStep = precisionStep;
+            fieldType.setNumericPrecisionStep(precisionStep);
             return builder;
         }
 
@@ -155,6 +156,13 @@ public abstract class NumberFieldMapper<T extends Number> extends AbstractFieldM
         @Override
         protected NumericTokenStream initialValue() {
             return new NumericTokenStream(8);
+        }
+    };
+    
+    private static ThreadLocal<NumericTokenStream> tokenStream16 = new ThreadLocal<NumericTokenStream>() {
+        @Override
+        protected NumericTokenStream initialValue() {
+            return new NumericTokenStream(16);
         }
     };
 
@@ -274,13 +282,13 @@ public abstract class NumberFieldMapper<T extends Number> extends AbstractFieldM
     /**
      * A range filter based on the field data cache.
      */
-    public abstract Filter rangeFilter(IndexFieldDataService fieldData, Object lowerTerm, Object upperTerm, boolean includeLower, boolean includeUpper, @Nullable QueryParseContext context);
+    public abstract Filter rangeFilter(QueryParseContext parseContext, Object lowerTerm, Object upperTerm, boolean includeLower, boolean includeUpper, @Nullable QueryParseContext context);
 
     /**
      * A terms filter based on the field data cache for numeric fields.
      */
     @Override
-    public Filter termsFilter(IndexFieldDataService fieldDataService, List values, @Nullable QueryParseContext context) {
+    public Filter termsFilter(QueryParseContext fieldDataService, List values, @Nullable QueryParseContext context) {
         IndexNumericFieldData fieldData = fieldDataService.getForField(this);
         if (fieldData.getNumericType().isFloatingPoint()) {
             // create with initial size large enough to avoid rehashing
@@ -369,11 +377,11 @@ public abstract class NumberFieldMapper<T extends Number> extends AbstractFieldM
     protected NumericTokenStream popCachedStream() {
         if (precisionStep == 4) {
             return tokenStream4.get();
-        }
-        if (precisionStep == 8) {
+        } else if (precisionStep == 8) {
             return tokenStream8.get();
-        }
-        if (precisionStep == Integer.MAX_VALUE) {
+        } else if (precisionStep == 16) {
+            return tokenStream16.get();
+        } else if (precisionStep == Integer.MAX_VALUE) {
             return tokenStreamMax.get();
         }
         return tokenStream.get();
@@ -450,7 +458,7 @@ public abstract class NumberFieldMapper<T extends Number> extends AbstractFieldM
         }
 
         @Override
-        public TokenStream tokenStream(Analyzer analyzer) throws IOException {
+        public TokenStream tokenStream(Analyzer analyzer, TokenStream reuse) throws IOException {
             return null;
         }
 

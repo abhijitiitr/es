@@ -20,7 +20,7 @@ package org.elasticsearch.index.fielddata.plain;
 
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.RamUsageEstimator;
-import org.elasticsearch.common.util.BigFloatArrayList;
+import org.elasticsearch.common.util.FloatArray;
 import org.elasticsearch.index.fielddata.*;
 import org.elasticsearch.index.fielddata.ordinals.Ordinals;
 
@@ -28,32 +28,24 @@ import org.elasticsearch.index.fielddata.ordinals.Ordinals;
  */
 public abstract class FloatArrayAtomicFieldData extends AbstractAtomicNumericFieldData {
 
-    public static FloatArrayAtomicFieldData empty(int numDocs) {
-        return new Empty(numDocs);
+    public static FloatArrayAtomicFieldData empty() {
+        return new Empty();
     }
-
-    private final int numDocs;
 
     protected long size = -1;
 
-    public FloatArrayAtomicFieldData(int numDocs) {
+    public FloatArrayAtomicFieldData() {
         super(true);
-        this.numDocs = numDocs;
     }
 
     @Override
     public void close() {
     }
 
-    @Override
-    public int getNumDocs() {
-        return numDocs;
-    }
-
     static class Empty extends FloatArrayAtomicFieldData {
 
-        Empty(int numDocs) {
-            super(numDocs);
+        Empty() {
+            super();
         }
 
         @Override
@@ -67,22 +59,12 @@ public abstract class FloatArrayAtomicFieldData extends AbstractAtomicNumericFie
         }
 
         @Override
-        public boolean isMultiValued() {
-            return false;
-        }
-
-        @Override
-        public long getNumberUniqueValues() {
+        public long ramBytesUsed() {
             return 0;
         }
 
         @Override
-        public long getMemorySizeInBytes() {
-            return 0;
-        }
-
-        @Override
-        public BytesValues getBytesValues(boolean needsHashes) {
+        public BytesValues getBytesValues() {
             return BytesValues.EMPTY;
         }
 
@@ -95,28 +77,18 @@ public abstract class FloatArrayAtomicFieldData extends AbstractAtomicNumericFie
     public static class WithOrdinals extends FloatArrayAtomicFieldData {
 
         private final Ordinals ordinals;
-        private final BigFloatArrayList values;
+        private final FloatArray values;
 
-        public WithOrdinals(BigFloatArrayList values, int numDocs, Ordinals ordinals) {
-            super(numDocs);
+        public WithOrdinals(FloatArray values, Ordinals ordinals) {
+            super();
             this.values = values;
             this.ordinals = ordinals;
         }
 
         @Override
-        public boolean isMultiValued() {
-            return ordinals.isMultiValued();
-        }
-
-        @Override
-        public long getNumberUniqueValues() {
-            return ordinals.getNumOrds();
-        }
-
-        @Override
-        public long getMemorySizeInBytes() {
+        public long ramBytesUsed() {
             if (size == -1) {
-                size = RamUsageEstimator.NUM_BYTES_INT/*size*/ + RamUsageEstimator.NUM_BYTES_INT/*numDocs*/ + values.sizeInBytes() + ordinals.getMemorySizeInBytes();
+                size = RamUsageEstimator.NUM_BYTES_INT/*size*/ + values.ramBytesUsed() + ordinals.ramBytesUsed();
             }
             return size;
         }
@@ -133,25 +105,25 @@ public abstract class FloatArrayAtomicFieldData extends AbstractAtomicNumericFie
 
         static class LongValues extends org.elasticsearch.index.fielddata.LongValues.WithOrdinals {
 
-            private final BigFloatArrayList values;
+            private final FloatArray values;
 
-            LongValues(BigFloatArrayList values, Ordinals.Docs ordinals) {
+            LongValues(FloatArray values, BytesValues.WithOrdinals ordinals) {
                 super(ordinals);
                 this.values = values;
             }
 
             @Override
             public long getValueByOrd(long ord) {
-                assert ord != Ordinals.MISSING_ORDINAL;
+                assert ord != BytesValues.WithOrdinals.MISSING_ORDINAL;
                 return (long) values.get(ord);
             }
         }
 
         static class DoubleValues extends org.elasticsearch.index.fielddata.DoubleValues.WithOrdinals {
 
-            private final BigFloatArrayList values;
+            private final FloatArray values;
 
-            DoubleValues(BigFloatArrayList values, Ordinals.Docs ordinals) {
+            DoubleValues(FloatArray values, BytesValues.WithOrdinals ordinals) {
                 super(ordinals);
                 this.values = values;
             }
@@ -169,31 +141,19 @@ public abstract class FloatArrayAtomicFieldData extends AbstractAtomicNumericFie
      */
     public static class SingleFixedSet extends FloatArrayAtomicFieldData {
 
-        private final BigFloatArrayList values;
+        private final FloatArray values;
         private final FixedBitSet set;
-        private final long numOrd;
 
-        public SingleFixedSet(BigFloatArrayList values, int numDocs, FixedBitSet set, long numOrd) {
-            super(numDocs);
+        public SingleFixedSet(FloatArray values, FixedBitSet set) {
+            super();
             this.values = values;
             this.set = set;
-            this.numOrd = numOrd;
         }
 
         @Override
-        public boolean isMultiValued() {
-            return false;
-        }
-
-        @Override
-        public long getNumberUniqueValues() {
-            return numOrd;
-        }
-
-        @Override
-        public long getMemorySizeInBytes() {
+        public long ramBytesUsed() {
             if (size == -1) {
-                size = RamUsageEstimator.NUM_BYTES_ARRAY_HEADER + values.sizeInBytes() + RamUsageEstimator.sizeOf(set.getBits());
+                size = RamUsageEstimator.NUM_BYTES_ARRAY_HEADER + values.ramBytesUsed() + RamUsageEstimator.sizeOf(set.getBits());
             }
             return size;
         }
@@ -211,10 +171,10 @@ public abstract class FloatArrayAtomicFieldData extends AbstractAtomicNumericFie
 
         static class LongValues extends org.elasticsearch.index.fielddata.LongValues {
 
-            private final BigFloatArrayList values;
+            private final FloatArray values;
             private final FixedBitSet set;
 
-            LongValues(BigFloatArrayList values, FixedBitSet set) {
+            LongValues(FloatArray values, FixedBitSet set) {
                 super(false);
                 this.values = values;
                 this.set = set;
@@ -234,10 +194,10 @@ public abstract class FloatArrayAtomicFieldData extends AbstractAtomicNumericFie
 
         static class DoubleValues extends org.elasticsearch.index.fielddata.DoubleValues {
 
-            private final BigFloatArrayList values;
+            private final FloatArray values;
             private final FixedBitSet set;
 
-            DoubleValues(BigFloatArrayList values, FixedBitSet set) {
+            DoubleValues(FloatArray values, FixedBitSet set) {
                 super(false);
                 this.values = values;
                 this.set = set;
@@ -262,33 +222,21 @@ public abstract class FloatArrayAtomicFieldData extends AbstractAtomicNumericFie
      */
     public static class Single extends FloatArrayAtomicFieldData {
 
-        private final BigFloatArrayList values;
-        private final long numOrd;
+        private final FloatArray values;
 
         /**
          * Note, here, we assume that there is no offset by 1 from docId, so position 0
          * is the value for docId 0.
          */
-        public Single(BigFloatArrayList values, int numDocs, long numOrd) {
-            super(numDocs);
+        public Single(FloatArray values) {
+            super();
             this.values = values;
-            this.numOrd = numOrd;
         }
 
         @Override
-        public boolean isMultiValued() {
-            return false;
-        }
-
-        @Override
-        public long getNumberUniqueValues() {
-            return numOrd;
-        }
-
-        @Override
-        public long getMemorySizeInBytes() {
+        public long ramBytesUsed() {
             if (size == -1) {
-                size = RamUsageEstimator.NUM_BYTES_ARRAY_HEADER + values.sizeInBytes();
+                size = RamUsageEstimator.NUM_BYTES_ARRAY_HEADER + values.ramBytesUsed();
             }
             return size;
         }
@@ -306,9 +254,9 @@ public abstract class FloatArrayAtomicFieldData extends AbstractAtomicNumericFie
 
         static class LongValues extends DenseLongValues {
 
-            private final BigFloatArrayList values;
+            private final FloatArray values;
 
-            LongValues(BigFloatArrayList values) {
+            LongValues(FloatArray values) {
                 super(false);
                 this.values = values;
             }
@@ -321,9 +269,9 @@ public abstract class FloatArrayAtomicFieldData extends AbstractAtomicNumericFie
 
         static class DoubleValues extends DenseDoubleValues {
 
-            private final BigFloatArrayList values;
+            private final FloatArray values;
 
-            DoubleValues(BigFloatArrayList values) {
+            DoubleValues(FloatArray values) {
                 super(false);
                 this.values = values;
             }

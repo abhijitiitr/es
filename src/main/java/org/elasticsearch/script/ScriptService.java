@@ -44,6 +44,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
@@ -54,6 +55,10 @@ import java.util.concurrent.TimeUnit;
  */
 public class ScriptService extends AbstractComponent {
 
+    public static final String DEFAULT_SCRIPTING_LANGUAGE_SETTING = "script.default_lang";
+    public static final String DISABLE_DYNAMIC_SCRIPTING_SETTING = "script.disable_dynamic";
+    public static final String DISABLE_DYNAMIC_SCRIPTING_DEFAULT = "sandbox";
+
     private final String defaultLang;
 
     private final ImmutableMap<String, ScriptEngineService> scriptEngines;
@@ -63,7 +68,38 @@ public class ScriptService extends AbstractComponent {
     private final Cache<CacheKey, CompiledScript> cache;
     private final File scriptsDirectory;
 
-    private final boolean disableDynamic;
+    private final DynamicScriptDisabling dynamicScriptingDisabled;
+
+    /**
+     * Enum defining the different dynamic settings for scripting, either
+     * ONLY_DISK_ALLOWED (scripts must be placed on disk), EVERYTHING_ALLOWED
+     * (all dynamic scripting is enabled), or SANDBOXED_ONLY (only sandboxed
+     * scripting languages are allowed)
+     */
+    enum DynamicScriptDisabling {
+        EVERYTHING_ALLOWED,
+        ONLY_DISK_ALLOWED,
+        SANDBOXED_ONLY;
+
+        public static final DynamicScriptDisabling parse(String s) {
+            switch (s.toLowerCase(Locale.ROOT)) {
+                // true for "disable_dynamic" means only on-disk scripts are enabled
+                case "true":
+                case "all":
+                    return ONLY_DISK_ALLOWED;
+                // false for "disable_dynamic" means all scripts are enabled
+                case "false":
+                case "none":
+                    return EVERYTHING_ALLOWED;
+                // only sandboxed scripting is enabled
+                case "sandbox":
+                case "sandboxed":
+                    return SANDBOXED_ONLY;
+                default:
+                    throw new ElasticsearchIllegalArgumentException("Unrecognized script allowance setting: [" + s + "]");
+            }
+        }
+    }
 
     @Inject
     public ScriptService(Settings settings, Environment env, Set<ScriptEngineService> scriptEngines,
@@ -74,8 +110,8 @@ public class ScriptService extends AbstractComponent {
         TimeValue cacheExpire = componentSettings.getAsTime("cache.expire", null);
         logger.debug("using script cache with max_size [{}], expire [{}]", cacheMaxSize, cacheExpire);
 
-        this.defaultLang = componentSettings.get("default_lang", "mvel");
-        this.disableDynamic = componentSettings.getAsBoolean("disable_dynamic", false);
+        this.defaultLang = settings.get(DEFAULT_SCRIPTING_LANGUAGE_SETTING, "groovy");
+        this.dynamicScriptingDisabled = DynamicScriptDisabling.parse(settings.get(DISABLE_DYNAMIC_SCRIPTING_SETTING, DISABLE_DYNAMIC_SCRIPTING_DEFAULT));
 
         CacheBuilder cacheBuilder = CacheBuilder.newBuilder();
         if (cacheMaxSize >= 0) {
@@ -129,8 +165,8 @@ public class ScriptService extends AbstractComponent {
         if (lang == null) {
             lang = defaultLang;
         }
-        if (dynamicScriptDisabled(lang)) {
-            throw new ScriptException("dynamic scripting disabled");
+        if (!dynamicScriptEnabled(lang)) {
+            throw new ScriptException("dynamic scripting for [" + lang + "] disabled");
         }
         CacheKey cacheKey = new CacheKey(lang, script);
         compiled = cache.getIfPresent(cacheKey);
@@ -175,12 +211,21 @@ public class ScriptService extends AbstractComponent {
         cache.invalidateAll();
     }
 
-    private boolean dynamicScriptDisabled(String lang) {
-        if (!disableDynamic) {
-            return false;
+    private boolean dynamicScriptEnabled(String lang) {
+        ScriptEngineService service = scriptEngines.get(lang);
+        if (service == null) {
+            throw new ElasticsearchIllegalArgumentException("script_lang not supported [" + lang + "]");
         }
-        // we allow "native" executions since they register through plugins, so they are "allowed"
-        return !"native".equals(lang);
+
+        // Templating languages (mustache) and native scripts are always
+        // allowed, "native" executions are registered through plugins
+        if (this.dynamicScriptingDisabled == DynamicScriptDisabling.EVERYTHING_ALLOWED || "native".equals(lang) || "mustache".equals(lang)) {
+            return true;
+        } else if (this.dynamicScriptingDisabled == DynamicScriptDisabling.ONLY_DISK_ALLOWED) {
+            return false;
+        } else {
+            return service.sandboxed();
+        }
     }
 
     private class ScriptChangesListener extends FileChangesListener {
@@ -207,7 +252,7 @@ public class ScriptService extends AbstractComponent {
                         if (s.equals(scriptNameExt.v2())) {
                             found = true;
                             try {
-                                logger.trace("compiling script file " + file.getAbsolutePath());
+                                logger.info("compiling script file [{}]", file.getAbsolutePath());
                                 String script = Streams.copyToString(new InputStreamReader(new FileInputStream(file), Charsets.UTF_8));
                                 staticCache.put(scriptNameExt.v1(), new CompiledScript(engineService.types()[0], engineService.compile(script)));
                             } catch (Throwable e) {
@@ -234,7 +279,7 @@ public class ScriptService extends AbstractComponent {
         @Override
         public void onFileDeleted(File file) {
             Tuple<String, String> scriptNameExt = scriptNameExt(file);
-            logger.trace("removing script file " + file.getAbsolutePath());
+            logger.info("removing script file [{}]", file.getAbsolutePath());
             staticCache.remove(scriptNameExt.v1());
         }
 

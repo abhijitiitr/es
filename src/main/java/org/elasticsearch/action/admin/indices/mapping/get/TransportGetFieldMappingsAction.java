@@ -55,12 +55,12 @@ public class TransportGetFieldMappingsAction extends TransportAction<GetFieldMap
     @Override
     protected void doExecute(GetFieldMappingsRequest request, final ActionListener<GetFieldMappingsResponse> listener) {
         ClusterState clusterState = clusterService.state();
-        String[] concreteIndices = clusterState.metaData().concreteIndices(request.indices(), request.indicesOptions());
+        String[] concreteIndices = clusterState.metaData().concreteIndices(request.indicesOptions(), request.indices());
         final AtomicInteger indexCounter = new AtomicInteger();
         final AtomicInteger completionCounter = new AtomicInteger(concreteIndices.length);
         final AtomicReferenceArray<Object> indexResponses = new AtomicReferenceArray<>(concreteIndices.length);
 
-        if (concreteIndices == null || concreteIndices.length == 0) {
+        if (concreteIndices.length == 0) {
             listener.onResponse(new GetFieldMappingsResponse());
         } else {
             boolean probablySingleFieldRequest = concreteIndices.length == 1 && request.types().length == 1 && request.fields().length == 1;
