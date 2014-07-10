@@ -319,7 +319,7 @@ public abstract class ResponseTerms implements Streamable {
          */
         @Override
         protected void load(AtomicReaderContext context) {
-            values = indexFieldData.load(context).getBytesValues(false); // load field data cache
+            values = indexFieldData.load(context).getBytesValues(); // load field data cache
         }
 
         /**
@@ -499,7 +499,7 @@ public abstract class ResponseTerms implements Streamable {
          */
         @Override
         protected void load(AtomicReaderContext context) {
-            values = indexFieldData.load(context).getBytesValues(true); // load field data cache + hashes
+            values = indexFieldData.load(context).getBytesValues(); // load field data cache + hashes
         }
 
         /**

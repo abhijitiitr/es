@@ -32,7 +32,6 @@ import org.elasticsearch.index.fielddata.IndexFieldData;
 import org.elasticsearch.index.fielddata.IndexNumericFieldData;
 import org.elasticsearch.index.search.BloomFieldDataTermsFilter;
 import org.elasticsearch.index.search.FieldDataTermsFilter;
-
 /**
  * A {@link TermsLookup} implementation that gathers the filter terms from the specified field of documents matching
  * the specified filter.

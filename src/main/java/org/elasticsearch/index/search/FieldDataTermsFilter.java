@@ -254,7 +254,7 @@ public abstract class FieldDataTermsFilter extends Filter {
             // make sure there are terms to filter on
             if (terms == null || terms.size() == 0) return null;
 
-            final BytesValues values = fieldData.load(context).getBytesValues(true); // load fielddata
+            final BytesValues values = fieldData.load(context).getBytesValues(); // load fielddata
             return new MatchDocIdSet(context.reader().maxDoc(), acceptDocs) {
                 private final BytesRef spare = new BytesRef();
 

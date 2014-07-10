@@ -282,7 +282,6 @@ public class TermsFilterParser implements FilterParser {
                 if (cache == null) {
                     cache = false;
                 }
-
                 termsLookup = new QueryTermsLookup(termsByQueryReq, parseContext.fieldData().getForField(fieldMapper));
             } else {
                 termsLookup = new FieldTermsLookup(fieldMapper, lookupIndices.get(0), lookupTypes.get(0),

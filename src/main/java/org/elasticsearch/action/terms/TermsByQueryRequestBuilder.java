@@ -22,17 +22,20 @@ package org.elasticsearch.action.terms;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.support.broadcast.BroadcastOperationRequestBuilder;
 import org.elasticsearch.client.Client;
-import org.elasticsearch.client.internal.InternalClient;
+// import org.elasticsearch.client.internal.InternalClient;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.index.query.FilterBuilder;
+import org.elasticsearch.action.terms.TermsByQueryResponse;
+import org.elasticsearch.action.terms.TermsByQueryRequest;
+import org.elasticsearch.action.terms.TermsByQueryRequestBuilder;
 
 /**
  * A terms by query action request builder.  This is an internal api.
  */
-public class TermsByQueryRequestBuilder extends BroadcastOperationRequestBuilder<TermsByQueryRequest, TermsByQueryResponse, TermsByQueryRequestBuilder> {
+public class TermsByQueryRequestBuilder extends BroadcastOperationRequestBuilder<TermsByQueryRequest, TermsByQueryResponse, TermsByQueryRequestBuilder, Client> {
 
     public TermsByQueryRequestBuilder(Client client) {
-        super((InternalClient) client, new TermsByQueryRequest());
+        super(client, new TermsByQueryRequest());
     }
 
     /**
@@ -165,6 +168,6 @@ public class TermsByQueryRequestBuilder extends BroadcastOperationRequestBuilder
      */
     @Override
     protected void doExecute(ActionListener<TermsByQueryResponse> listener) {
-        ((InternalClient) client).execute(TermsByQueryAction.INSTANCE, request, listener);
+        (client).execute(TermsByQueryAction.INSTANCE, request, listener);
     }
 }

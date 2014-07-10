@@ -47,6 +47,10 @@ public abstract class BytesValues {
 
     private final boolean multiValued;
 
+    protected final BytesRef scratch = new BytesRef();
+
+    protected int docId = -1;
+
     /**
      * Creates a new {@link BytesValues} instance
      * @param multiValued <code>true</code> iff this instance is multivalued. Otherwise <code>false</code>.
@@ -61,6 +65,16 @@ public abstract class BytesValues {
     public final boolean isMultiValued() {
         return multiValued;
     }
+
+    /**
+     * Converts the current shared {@link BytesRef} to a stable instance. Note,
+     * this calls makes the bytes safe for *reads*, not writes (into the same BytesRef). For example,
+     * it makes it safe to be placed in a map.
+     */
+    public BytesRef copyShared() {
+        return BytesRef.deepCopyOf(scratch);
+    }
+
 
     /**
      * Sets iteration to the specified docID and returns the number of
@@ -88,6 +102,16 @@ public abstract class BytesValues {
      * @return the next value for the current docID set to {@link #setDocument(int)}.
      */
     public abstract BytesRef nextValue();
+
+    /**
+     * Returns the hash value of the previously returned shared {@link BytesRef} instances.
+     *
+     * @return the hash value of the previously returned shared {@link BytesRef} instances.
+     */
+    public int currentValueHash() {
+        return scratch.hashCode();
+    }
+
 
     /**
      * Returns the order the values are returned from {@link #nextValue()}.

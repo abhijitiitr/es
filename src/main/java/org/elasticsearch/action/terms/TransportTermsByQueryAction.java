@@ -141,7 +141,7 @@ public class TransportTermsByQueryAction extends TransportBroadcastOperationActi
      * Creates a new {@link ShardTermsByQueryRequest}
      */
     @Override
-    protected ShardTermsByQueryRequest newShardRequest(ShardRouting shard, TermsByQueryRequest request) {
+    protected ShardTermsByQueryRequest newShardRequest(int inta,ShardRouting shard, TermsByQueryRequest request) {
         String[] filteringAliases = clusterService.state().metaData().filteringAliases(shard.index(), request.indices());
         return new ShardTermsByQueryRequest(shard.index(), shard.id(), filteringAliases, request);
     }

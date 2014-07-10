@@ -23,11 +23,12 @@ import org.elasticsearch.action.Action;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.transport.TransportRequestOptions;
+import org.elasticsearch.action.ClientAction;
 
 /**
  * The action to request terms by query
  */
-public class TermsByQueryAction extends Action<TermsByQueryRequest, TermsByQueryResponse, TermsByQueryRequestBuilder> {
+public class TermsByQueryAction extends ClientAction<TermsByQueryRequest, TermsByQueryResponse, TermsByQueryRequestBuilder> {
 
     public static final TermsByQueryAction INSTANCE = new TermsByQueryAction();
     public static final String NAME = "termsbyquery";
