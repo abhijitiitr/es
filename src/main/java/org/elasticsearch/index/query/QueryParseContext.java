@@ -45,6 +45,8 @@ import org.elasticsearch.index.similarity.SimilarityService;
 import org.elasticsearch.script.ScriptService;
 import org.elasticsearch.search.internal.SearchContext;
 import org.elasticsearch.search.lookup.SearchLookup;
+import org.elasticsearch.index.fielddata.IndexFieldDataService;
+
 
 import java.io.IOException;
 import java.util.*;
@@ -193,6 +195,10 @@ public class QueryParseContext {
         } else {
             return indexQueryParser.fieldDataService.getForField(mapper);
         }
+    }
+
+    public IndexFieldDataService fieldData() {
+        return indexQueryParser.fieldDataService;
     }
 
     public void addNamedFilter(String name, Filter filter) {
